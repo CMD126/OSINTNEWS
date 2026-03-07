@@ -1,2 +1,16 @@
+# Core search engine
 duckduckgo-search>=6.0.0
+
+# Terminal & UI helpers
 colorama>=0.4.6
+
+# Windows notifications (optional — fails silently if not installed)
+plyer>=2.1.0
+
+# Excel export
+openpyxl>=3.1.0
+
+# AI / RAG providers — install only what you use:
+anthropic>=0.40.0       # Claude API (recommended)
+openai>=1.50.0          # OpenAI GPT alternative
+requests>=2.31.0        # Ollama local API (free, offline)

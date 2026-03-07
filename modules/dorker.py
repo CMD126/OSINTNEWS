@@ -1,38 +1,38 @@
 """
-Dork query builder - defines all Google-style dork templates
-and builds queries from a user-supplied target string.
+Dork query builder - all Google-style dork templates.
+Supports custom date ranges via the after: operator.
 """
 
 DORK_CATEGORIES = {
     "1": {
-        "name": "Recent News",
-        "description": "Major news outlets (Reuters, BBC, AP, CNN, Guardian)",
-        "template": '"{target}" (site:reuters.com OR site:bbc.com OR site:apnews.com OR site:cnn.com OR site:theguardian.com OR site:nbcnews.com)',
+        "name": "Recent News (EN)",
+        "description": "Major English news outlets",
+        "template": '"{target}" (site:reuters.com OR site:bbc.com OR site:apnews.com OR site:cnn.com OR site:theguardian.com OR site:nbcnews.com OR site:abcnews.go.com)',
     },
     "2": {
-        "name": "All News",
+        "name": "All News (URL)",
         "description": "Any page with 'news' in the URL",
         "template": '"{target}" inurl:news',
     },
     "3": {
         "name": "Press Releases",
-        "description": "Official statements and press releases",
-        "template": '"{target}" ("press release" OR "official statement" OR "announces" OR "announces that")',
+        "description": "Official statements and announcements",
+        "template": '"{target}" ("press release" OR "official statement" OR "announces" OR "announcement")',
     },
     "4": {
-        "name": "Investigations & Controversies",
-        "description": "Scandals, lawsuits, arrests, indictments",
-        "template": '"{target}" (investigation OR scandal OR lawsuit OR arrested OR charged OR indicted OR fraud OR corruption)',
+        "name": "Investigations & Legal",
+        "description": "Scandals, lawsuits, arrests, fraud",
+        "template": '"{target}" (investigation OR scandal OR lawsuit OR arrested OR charged OR indicted OR fraud OR corruption OR convicted)',
     },
     "5": {
         "name": "Financial News",
         "description": "Business and financial coverage",
-        "template": '"{target}" (site:bloomberg.com OR site:ft.com OR site:wsj.com OR site:forbes.com OR site:businessinsider.com OR site:marketwatch.com)',
+        "template": '"{target}" (site:bloomberg.com OR site:ft.com OR site:wsj.com OR site:forbes.com OR site:businessinsider.com OR site:marketwatch.com OR site:cnbc.com)',
     },
     "6": {
-        "name": "Government & Legal",
+        "name": "Government & Legal Docs",
         "description": "Government websites and legal records",
-        "template": '"{target}" (site:.gov OR site:.gov.uk OR site:.gc.ca OR site:.europa.eu)',
+        "template": '"{target}" (site:.gov OR site:.gov.uk OR site:.gc.ca OR site:.europa.eu OR site:.gov.au)',
     },
     "7": {
         "name": "PDF Documents",
@@ -41,30 +41,50 @@ DORK_CATEGORIES = {
     },
     "8": {
         "name": "Social Media",
-        "description": "Twitter/X, LinkedIn, Reddit mentions",
-        "template": '"{target}" (site:twitter.com OR site:x.com OR site:linkedin.com OR site:reddit.com)',
+        "description": "Twitter/X, LinkedIn, Reddit, Facebook",
+        "template": '"{target}" (site:twitter.com OR site:x.com OR site:linkedin.com OR site:reddit.com OR site:facebook.com)',
     },
     "9": {
         "name": "Tech & Cyber News",
         "description": "Technology and cybersecurity coverage",
-        "template": '"{target}" (site:techcrunch.com OR site:wired.com OR site:arstechnica.com OR site:theverge.com OR site:bleepingcomputer.com)',
+        "template": '"{target}" (site:techcrunch.com OR site:wired.com OR site:arstechnica.com OR site:theverge.com OR site:bleepingcomputer.com OR site:krebsonsecurity.com)',
     },
     "10": {
-        "name": "Cached & Archive",
-        "description": "Cached pages and web archives",
-        "template": '"{target}" (site:web.archive.org OR cache:"{target}")',
+        "name": "Web Archive",
+        "description": "Wayback Machine and cached pages",
+        "template": '"{target}" site:web.archive.org',
+    },
+    "11": {
+        "name": "Noticias PT / BR",
+        "description": "Notícias em Português (Portugal e Brasil)",
+        "template": '"{target}" (site:publico.pt OR site:dn.pt OR site:observador.pt OR site:cm.pt OR site:g1.globo.com OR site:uol.com.br OR site:folha.uol.com.br OR site:estadao.com.br)',
+    },
+    "12": {
+        "name": "Noticias ES",
+        "description": "Noticias en Español",
+        "template": '"{target}" (site:elpais.com OR site:elmundo.es OR site:abc.es OR site:lavanguardia.com OR site:infobae.com OR site:clarin.com)',
+    },
+    "13": {
+        "name": "Forums & Discussions",
+        "description": "Forums, Quora, Stack Exchange, Hackernews",
+        "template": '"{target}" (site:quora.com OR site:news.ycombinator.com OR site:stackexchange.com OR site:medium.com)',
+    },
+    "14": {
+        "name": "Leaked & Paste Sites",
+        "description": "Pastebins, leaks, breach sites",
+        "template": '"{target}" (site:pastebin.com OR site:ghostbin.com OR site:paste.ee OR "leaked" OR "breach" OR "dump")',
     },
 }
 
 
 def build_dorks(target: str, selected: list) -> list:
-    """Build a list of dork dicts from the selected category keys."""
-    dorks = []
-    for key in selected:
-        cat = DORK_CATEGORIES.get(key)
-        if cat:
-            dorks.append({
-                "category": cat["name"],
-                "query": cat["template"].replace("{target}", target),
-            })
-    return dorks
+    """Build dork dicts for the selected category keys and target string."""
+    return [
+        {
+            "category": DORK_CATEGORIES[key]["name"],
+            "query": DORK_CATEGORIES[key]["template"].replace("{target}", target),
+            "target": target,
+        }
+        for key in selected
+        if key in DORK_CATEGORIES
+    ]

@@ -1,50 +1,79 @@
 """
 Search engine module - executes dork queries via DuckDuckGo.
-Uses duckduckgo_search library (no API key required).
+Supports: proxy, time limit, per-result callbacks, status callbacks.
 """
 
 import time
 from duckduckgo_search import DDGS
 
-# ANSI color helpers
-_YELLOW = "\033[93m"
-_GREEN  = "\033[92m"
-_RED    = "\033[91m"
-_GREY   = "\033[90m"
-_RESET  = "\033[0m"
-
 
 def run_searches(dorks: list, max_results: int = 10, delay: float = 1.5) -> list:
+    """Simple blocking search. Returns all results as a list."""
+    return run_searches_with_callback(
+        dorks, max_results=max_results, delay=delay
+    )
+
+
+def run_searches_with_callback(
+    dorks: list,
+    max_results: int = 10,
+    delay: float = 1.5,
+    proxy: str | None = None,
+    timelimit: str | None = None,
+    on_result=None,
+    on_status=None,
+) -> list:
     """
-    Execute each dork query and return all results as a flat list.
+    Execute dork queries and return all results.
 
-    Each result dict contains:
-        title, href, body, category, query
+    Parameters
+    ----------
+    dorks       : list of dork dicts from dorker.build_dorks()
+    max_results : max results per query
+    delay       : seconds between queries (polite throttle)
+    proxy       : optional proxy URL e.g. "http://127.0.0.1:8080"
+    timelimit   : DuckDuckGo time filter — 'd', 'w', 'm', 'y' or None
+    on_result   : callable(result_dict) — called for each result in real time
+    on_status   : callable(message_str) — called for status updates
     """
-    all_results = []
+    all_results: list = []
 
-    with DDGS() as ddgs:
-        for dork in dorks:
-            category = dork["category"]
-            query    = dork["query"]
+    ddgs_kwargs = {}
+    if proxy:
+        ddgs_kwargs["proxies"] = {"http": proxy, "https": proxy}
 
-            print(f"\n  {_YELLOW}[~]{_RESET} {category}")
-            print(f"      {_GREY}Query: {query[:80]}{'...' if len(query) > 80 else ''}{_RESET}")
+    with DDGS(**ddgs_kwargs) as ddgs:
+        for i, dork in enumerate(dorks, 1):
+            category = dork.get("category", "Unknown")
+            query    = dork.get("query", "")
+            target   = dork.get("target", "")
+
+            if on_status:
+                on_status(f"[{i}/{len(dorks)}] {category} — {target}")
 
             try:
-                results = list(ddgs.text(query, max_results=max_results))
+                search_kwargs = {"max_results": max_results}
+                if timelimit:
+                    search_kwargs["timelimit"] = timelimit
+
+                results = list(ddgs.text(query, **search_kwargs))
 
                 for r in results:
                     r["category"] = category
                     r["query"]    = query
+                    r["target"]   = target
+                    all_results.append(r)
+                    if on_result:
+                        on_result(r)
 
-                all_results.extend(results)
-                print(f"      {_GREEN}[+]{_RESET} {len(results)} result(s) found")
+                if on_status:
+                    on_status(f"[{i}/{len(dorks)}] {category} — {len(results)} results")
 
             except Exception as exc:
-                print(f"      {_RED}[!]{_RESET} Error: {exc}")
+                if on_status:
+                    on_status(f"[{i}/{len(dorks)}] {category} — ERROR: {exc}")
 
-            # polite delay to avoid rate limiting
-            time.sleep(delay)
+            if i < len(dorks):
+                time.sleep(delay)
 
     return all_results
