@@ -4,7 +4,10 @@ Supports: proxy, time limit, per-result callbacks, status callbacks.
 """
 
 import time
-from duckduckgo_search import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 
 
 def run_searches(dorks: list, max_results: int = 10, delay: float = 1.5) -> list:

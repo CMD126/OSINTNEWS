@@ -1,5 +1,6 @@
 # Core search engine
-duckduckgo-search>=6.0.0
+ddgs>=0.1.0
+duckduckgo-search>=6.0.0   # fallback if ddgs not available
 
 # Terminal & UI helpers
 colorama>=0.4.6
