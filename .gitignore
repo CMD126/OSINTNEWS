@@ -1,0 +1,88 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+wheels/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ── OSINTNEWS runtime files ──────────────────────────────────────────────────
+# Generated reports — these can be large and contain sensitive intel
+reports/*
+!reports/.gitkeep
+
+# User settings (may contain API keys)
+data/settings.json
+
+# Dependency sentinel — regenerated on first run
+data/.deps_ok
+
+# Search history — contains personal search targets
+# Remove this line if you WANT to track your history in git
+data/history.json
+
+# Keep the empty folder structure so the app works on a fresh clone
+!data/.gitkeep
+
+# ── Secrets / credentials (never commit these) ───────────────────────────────
+.env
+.env.*
+*.env
+secrets.json
+credentials.json
+config.local.*
+api_keys.*
+
+# ── OS files ──────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── Editors & IDEs ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/

@@ -74,15 +74,47 @@ DORK_CATEGORIES = {
         "description": "Pastebins, leaks, breach sites",
         "template": '"{target}" (site:pastebin.com OR site:ghostbin.com OR site:paste.ee OR "leaked" OR "breach" OR "dump")',
     },
+    "15": {
+        "name": "GitHub & Code",
+        "description": "Source code, repos, gists, issues mentioning the target",
+        "template": '"{target}" (site:github.com OR site:gitlab.com OR site:gist.github.com OR site:bitbucket.org)',
+    },
+    "16": {
+        "name": "Academic & Research",
+        "description": "Papers, preprints, dissertations, patents",
+        "template": '"{target}" (site:arxiv.org OR site:scholar.google.com OR site:researchgate.net OR site:semanticscholar.org OR site:ssrn.com OR site:patents.google.com)',
+    },
+    "17": {
+        "name": "Video & Media",
+        "description": "YouTube, podcasts, interview coverage",
+        "template": '"{target}" (site:youtube.com OR site:vimeo.com OR site:rumble.com OR site:podcastaddict.com OR site:spotify.com/episode)',
+    },
+    "18": {
+        "name": "Telegram & Discord",
+        "description": "Public Telegram channels and Discord servers",
+        "template": '"{target}" (site:t.me OR site:telegram.me OR site:discord.com OR site:discord.gg)',
+    },
 }
+
+
+def _sanitize_target(target: str) -> str:
+    """
+    Sanitize a target string for safe insertion into dork queries.
+    Strips characters that could break dork syntax or inject operators.
+    """
+    # Remove double-quotes (which would break the quoted target phrase)
+    sanitized = target.replace('"', '')
+    # Strip leading/trailing whitespace
+    return sanitized.strip()
 
 
 def build_dorks(target: str, selected: list) -> list:
     """Build dork dicts for the selected category keys and target string."""
+    safe_target = _sanitize_target(target)
     return [
         {
             "category": DORK_CATEGORIES[key]["name"],
-            "query": DORK_CATEGORIES[key]["template"].replace("{target}", target),
+            "query": DORK_CATEGORIES[key]["template"].replace("{target}", safe_target),
             "target": target,
         }
         for key in selected

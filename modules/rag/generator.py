@@ -1,21 +1,25 @@
 """
 RAG Generator — sends retrieved context to an LLM and returns an AIAnalysis.
 
-Supports three providers:
+Supports four providers:
   1. Anthropic Claude  (recommended — best instruction-following for structured output)
   2. OpenAI GPT        (alternative cloud provider)
-  3. Ollama            (local/free — any model installed on the machine)
+  3. Google Gemini     (NEW — fast and cost-effective)
+  4. Ollama            (local/free — any model installed on the machine, now with streaming)
 
-Functional principle: each generate_* function is PURE from the caller's perspective.
-  - Input: SearchBundle + credentials
-  - Output: AIAnalysis (frozen dataclass)
-  - No global state mutation, no side effects beyond the API call itself.
+Upgrades (v2):
+  - Ollama now supports streaming via /api/generate with stream=True
+  - Google Gemini provider added (gemini-1.5-flash / gemini-1.5-pro)
+  - max_tokens is a configurable parameter (not hardcoded at 3000)
+  - Cleaner error messages with provider name in the model field
+  - Type annotations improved throughout
 """
 
 from __future__ import annotations
 import re
+import json
 from datetime import datetime
-from dataclasses import replace
+from typing import Callable
 
 from modules.rag.models import SearchBundle, AIAnalysis
 from modules.rag.prompts import build_prompt_pair
@@ -30,7 +34,6 @@ def _parse_risk_level(text: str) -> str:
     Pure function: extract the highest-mentioned risk level from the LLM response.
     Scans for the structured 'Risk Level:' label first, then falls back to keyword scan.
     """
-    # Try structured extraction first (e.g. "**Overall Risk Level: HIGH**")
     match = re.search(
         r'risk\s+level[:\s*_]+([A-Z]+)',
         text, re.IGNORECASE
@@ -40,7 +43,6 @@ def _parse_risk_level(text: str) -> str:
         if candidate in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
             return candidate
 
-    # Fallback: highest-severity keyword found anywhere in the text
     for level in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
         if level in text.upper():
             return level
@@ -96,32 +98,46 @@ def _make_analysis(target: str, text: str, model: str, items: tuple) -> AIAnalys
 # ---------------------------------------------------------------------------
 
 def generate_with_claude(
-    bundle:    SearchBundle,
-    api_key:   str,
-    model:     str = "claude-sonnet-4-6",
-    max_tokens: int = 3000,
+    bundle:      SearchBundle,
+    api_key:     str,
+    model:       str                      = "claude-sonnet-4-6",
+    max_tokens:  int                      = 4000,
+    on_token:    Callable[[str], None] | None = None,
 ) -> AIAnalysis:
     """
     Pure function: RAG Generator using Anthropic Claude API.
+    Supports optional streaming via on_token callback.
     Requires: pip install anthropic
     """
-    target = bundle.target
+    target   = bundle.target
     model_id = model or "claude-sonnet-4-6"
 
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
-
         system_prompt, user_prompt = build_prompt_pair(target, bundle.items)
 
-        response = client.messages.create(
-            model      = model_id,
-            max_tokens = max_tokens,
-            system     = system_prompt,
-            messages   = [{"role": "user", "content": user_prompt}],
-        )
+        if on_token is not None:
+            collected: list[str] = []
+            with client.messages.stream(
+                model      = model_id,
+                max_tokens = max_tokens,
+                system     = system_prompt,
+                messages   = [{"role": "user", "content": user_prompt}],
+            ) as stream:
+                for chunk in stream.text_stream:
+                    collected.append(chunk)
+                    on_token(chunk)
+            text = "".join(collected)
+        else:
+            response = client.messages.create(
+                model      = model_id,
+                max_tokens = max_tokens,
+                system     = system_prompt,
+                messages   = [{"role": "user", "content": user_prompt}],
+            )
+            text = response.content[0].text
 
-        text = response.content[0].text
         return _make_analysis(target, text, model_id, bundle.items)
 
     except Exception as exc:
@@ -129,13 +145,15 @@ def generate_with_claude(
 
 
 def generate_with_openai(
-    bundle:    SearchBundle,
-    api_key:   str,
-    model:     str = "gpt-4o",
-    max_tokens: int = 3000,
+    bundle:     SearchBundle,
+    api_key:    str,
+    model:      str                      = "gpt-4o",
+    max_tokens: int                      = 4000,
+    on_token:   Callable[[str], None] | None = None,
 ) -> AIAnalysis:
     """
     Pure function: RAG Generator using OpenAI API.
+    Supports optional streaming via on_token callback.
     Requires: pip install openai
     """
     target   = bundle.target
@@ -144,33 +162,98 @@ def generate_with_openai(
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
-
         system_prompt, user_prompt = build_prompt_pair(target, bundle.items)
 
-        response = client.chat.completions.create(
-            model      = model_id,
-            max_tokens = max_tokens,
-            messages   = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-        )
+        if on_token is not None:
+            collected: list[str] = []
+            stream = client.chat.completions.create(
+                model      = model_id,
+                max_tokens = max_tokens,
+                stream     = True,
+                messages   = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    collected.append(delta)
+                    on_token(delta)
+            text = "".join(collected)
+        else:
+            response = client.chat.completions.create(
+                model      = model_id,
+                max_tokens = max_tokens,
+                messages   = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+            )
+            text = response.choices[0].message.content or ""
 
-        text = response.choices[0].message.content
         return _make_analysis(target, text, model_id, bundle.items)
 
     except Exception as exc:
         return _make_error_analysis(target, model_id, str(exc))
 
 
+def generate_with_gemini(
+    bundle:     SearchBundle,
+    api_key:    str,
+    model:      str                      = "gemini-1.5-flash",
+    max_tokens: int                      = 4000,
+    on_token:   Callable[[str], None] | None = None,
+) -> AIAnalysis:
+    """
+    Pure function: RAG Generator using Google Gemini API.
+    Supports optional streaming via on_token callback.
+    Requires: pip install google-generativeai
+    """
+    target   = bundle.target
+    model_id = model or "gemini-1.5-flash"
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        system_prompt, user_prompt = build_prompt_pair(target, bundle.items)
+
+        gen_model = genai.GenerativeModel(
+            model_name   = model_id,
+            system_instruction = system_prompt,
+            generation_config  = genai.GenerationConfig(max_output_tokens=max_tokens),
+        )
+
+        if on_token is not None:
+            collected: list[str] = []
+            response = gen_model.generate_content(user_prompt, stream=True)
+            for chunk in response:
+                delta = chunk.text or ""
+                if delta:
+                    collected.append(delta)
+                    on_token(delta)
+            text = "".join(collected)
+        else:
+            response = gen_model.generate_content(user_prompt)
+            text = response.text or ""
+
+        return _make_analysis(target, text, f"gemini/{model_id}", bundle.items)
+
+    except Exception as exc:
+        return _make_error_analysis(target, f"gemini/{model_id}", str(exc))
+
+
 def generate_with_ollama(
     bundle:     SearchBundle,
-    model:      str = "llama3.2",
-    base_url:   str = "http://localhost:11434",
-    timeout:    int = 180,
+    model:      str                      = "llama3.2",
+    base_url:   str                      = "http://localhost:11434",
+    timeout:    int                      = 180,
+    on_token:   Callable[[str], None] | None = None,
 ) -> AIAnalysis:
     """
     Pure function: RAG Generator using a local Ollama instance (free, offline).
+    Now supports streaming via on_token callback.
     Requires: Ollama installed + model pulled  e.g. `ollama pull llama3.2`
     """
     target   = bundle.target
@@ -182,13 +265,45 @@ def generate_with_ollama(
         system_prompt, user_prompt = build_prompt_pair(target, bundle.items)
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-        resp = requests.post(
-            f"{base_url}/api/generate",
-            json    = {"model": model, "prompt": full_prompt, "stream": False},
-            timeout = timeout,
-        )
-        resp.raise_for_status()
-        text = resp.json().get("response", "")
+        payload = {
+            "model":  model,
+            "prompt": full_prompt,
+            "stream": on_token is not None,
+        }
+
+        if on_token is not None:
+            # Streaming: Ollama sends one JSON object per line
+            collected: list[str] = []
+            with requests.post(
+                f"{base_url}/api/generate",
+                json    = payload,
+                timeout = timeout,
+                stream  = True,
+            ) as resp:
+                resp.raise_for_status()
+                for raw_line in resp.iter_lines():
+                    if not raw_line:
+                        continue
+                    try:
+                        obj = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    chunk = obj.get("response", "")
+                    if chunk:
+                        collected.append(chunk)
+                        on_token(chunk)
+                    if obj.get("done"):
+                        break
+            text = "".join(collected)
+        else:
+            resp = requests.post(
+                f"{base_url}/api/generate",
+                json    = {**payload, "stream": False},
+                timeout = timeout,
+            )
+            resp.raise_for_status()
+            text = resp.json().get("response", "")
+
         return _make_analysis(target, text, model_id, bundle.items)
 
     except Exception as exc:
@@ -204,14 +319,20 @@ def generate(
     provider:     str,
     api_key:      str  = "",
     model:        str  = "",
+    max_tokens:   int  = 4000,
     ollama_url:   str  = "http://localhost:11434",
     ollama_model: str  = "llama3.2",
+    on_token:     Callable[[str], None] | None = None,
 ) -> AIAnalysis:
     """
     Pure dispatcher function.
     Selects the right generator based on `provider` string.
 
-    provider options: "claude" | "openai" | "ollama"
+    Parameters
+    ----------
+    provider   : "claude" | "openai" | "gemini" | "ollama"
+    max_tokens : max tokens to generate (default 4000)
+    on_token   : callable(str) | None — enables streaming mode for all providers.
     """
     if not bundle.items:
         return _make_error_analysis(
@@ -221,9 +342,21 @@ def generate(
         )
 
     dispatch = {
-        "claude": lambda b: generate_with_claude(b, api_key, model or "claude-sonnet-4-6"),
-        "openai": lambda b: generate_with_openai(b, api_key, model or "gpt-4o"),
-        "ollama": lambda b: generate_with_ollama(b, ollama_model or "llama3.2", ollama_url),
+        "claude": lambda b: generate_with_claude(
+            b, api_key, model or "claude-sonnet-4-6", max_tokens, on_token
+        ),
+        "openai": lambda b: generate_with_openai(
+            b, api_key, model or "gpt-4o", max_tokens, on_token
+        ),
+        "gemini": lambda b: generate_with_gemini(
+            b, api_key, model or "gemini-1.5-flash", max_tokens, on_token
+        ),
+        "ollama": lambda b: generate_with_ollama(
+            b,
+            model    = ollama_model or "llama3.2",
+            base_url = ollama_url,
+            on_token = on_token,
+        ),
     }
 
     fn = dispatch.get(provider.lower())
@@ -231,7 +364,7 @@ def generate(
         return _make_error_analysis(
             bundle.target,
             provider,
-            f"Unknown provider '{provider}'. Use: claude, openai, or ollama.",
+            f"Unknown provider '{provider}'. Use: claude, openai, gemini, or ollama.",
         )
 
     return fn(bundle)

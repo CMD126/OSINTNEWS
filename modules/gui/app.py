@@ -9,6 +9,7 @@ import threading
 import json
 import os
 import sys
+import time
 import webbrowser
 from queue import Queue, Empty
 from datetime import datetime
@@ -17,11 +18,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from modules.dorker   import DORK_CATEGORIES, build_dorks
-from modules.searcher import run_searches_with_callback
-from modules.reporter import save_report, save_report_to, save_csv, save_json, save_excel
-from modules.history  import HistoryManager
-from modules.notifier import notify
+from modules.dorker        import DORK_CATEGORIES, build_dorks
+from modules.searcher      import run_searches_with_callback
+from modules.reporter      import save_report, save_report_to, save_csv, save_json, save_excel, save_markdown
+from modules.history       import HistoryManager
+from modules.notifier      import notify
+from modules.rag.retriever import filter_raw_results
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -79,6 +81,15 @@ class OSINTNewsApp:
         self.ai_queue: Queue = Queue()
         self._search_thread: threading.Thread | None = None
         self._ai_thread:     threading.Thread | None = None
+        self._cancel_event:  threading.Event        = threading.Event()
+        self._search_start:  float                  = 0.0
+        self._search_total:  int                    = 0
+        self._search_done:   int                    = 0
+
+        # Ensure required directories exist on first run
+        os.makedirs(os.path.join(ROOT, "data"),    exist_ok=True)
+        os.makedirs(os.path.join(ROOT, "reports"), exist_ok=True)
+
         self.history        = HistoryManager(HISTORY_PATH)
         self.settings       = self._load_settings()
         self._last_analysis = None   # latest AIAnalysis object
@@ -186,7 +197,11 @@ class OSINTNewsApp:
         self.status_var = tk.StringVar(value="Ready.")
         tk.Label(sb, textvariable=self.status_var, bg=PANEL, fg=MUTED,
                  font=FN_SM, anchor="w").pack(side="left", padx=12, fill="x", expand=True)
-        self.progress = ttk.Progressbar(sb, mode="indeterminate", length=160)
+        self.progress_var = tk.IntVar(value=0)
+        self.progress = ttk.Progressbar(
+            sb, mode="determinate", length=160,
+            variable=self.progress_var, maximum=100,
+        )
         self.progress.pack(side="right", padx=10, pady=4)
 
     # ==================================================================
@@ -232,12 +247,23 @@ class OSINTNewsApp:
         cat_wrap.columnconfigure(0, weight=1)
         cat_wrap.columnconfigure(1, weight=1)
 
+        run_row = tk.Frame(left, bg=BG)
+        run_row.pack(fill="x")
+
         self.run_btn = tk.Button(
-            left, text="  ▶  RUN SEARCH  ", command=self.run_search,
+            run_row, text="  ▶  RUN SEARCH  ", command=self.run_search,
             bg=ACCENT, fg=WHITE, activebackground="#388bfd", activeforeground=WHITE,
             relief="flat", cursor="hand2", font=("Segoe UI", 12, "bold"), pady=10, bd=0,
         )
-        self.run_btn.pack(fill="x")
+        self.run_btn.pack(side="left", fill="x", expand=True)
+
+        self.cancel_btn = tk.Button(
+            run_row, text="  ✕  ", command=self.cancel_search,
+            bg=PANEL2, fg=RED_C, activebackground=BORDER, activeforeground=RED_C,
+            relief="flat", cursor="hand2", font=("Segoe UI", 12, "bold"), pady=10, bd=0,
+            state="disabled",
+        )
+        self.cancel_btn.pack(side="right", padx=(4, 0))
 
         def opt(text):
             lbl(right, text).pack(anchor="w", pady=(14, 2))
@@ -305,10 +331,11 @@ class OSINTNewsApp:
         self.ai_btn.pack(side="right", padx=8)
 
         for label_text, cmd, color in [
-            ("Excel", self.export_excel, GREEN),
-            ("JSON",  self.export_json,  ACCENT),
-            ("CSV",   self.export_csv,   YELLOW),
-            ("HTML",  self.export_html,  RED_C),
+            ("Excel",    self.export_excel,    GREEN),
+            ("JSON",     self.export_json,     ACCENT),
+            ("CSV",      self.export_csv,      YELLOW),
+            ("HTML",     self.export_html,     RED_C),
+            ("Markdown", self.export_markdown, PURPLE),
         ]:
             btn(tb, f"Export {label_text}", cmd, bg=PANEL2, fg=color, font=FN_SM, padx=10, pady=10).pack(side="right", padx=2)
 
@@ -332,8 +359,15 @@ class OSINTNewsApp:
         self.res_text.tag_configure("sep",   foreground=PANEL2)
         self.res_text.tag_configure("num",   foreground=MUTED)
         self.res_text.tag_configure("title", foreground=ACCENT, font=FN_BOLD)
-        self.res_text.tag_configure("url",   foreground=GREEN,  font=FN_MONO)
+        self.res_text.tag_configure("url",   foreground=GREEN,  font=FN_MONO,
+                                    underline=True)
         self.res_text.tag_configure("body",  foreground=MUTED,  font=FN_SM)
+        # Clickable URL support
+        self.res_text.tag_bind("url", "<Button-1>",  self._on_url_click)
+        self.res_text.tag_bind("url", "<Enter>",
+                               lambda e: self.res_text.config(cursor="hand2"))
+        self.res_text.tag_bind("url", "<Leave>",
+                               lambda e: self.res_text.config(cursor="arrow"))
 
     def _display_results(self, results: list):
         self.res_text.config(state="normal")
@@ -362,13 +396,33 @@ class OSINTNewsApp:
                 self.res_text.insert("end", title + "\n", "title")
                 if tgt:
                     self.res_text.insert("end", f"     ↳ {tgt}\n", "tgt")
-                self.res_text.insert("end", f"     {url}\n", "url")
+                # Embed URL as both the "url" style tag and a unique per-URL tag
+                # so the click handler can retrieve the actual address
+                url_tag = f"url_{url}"
+                if url_tag not in self.res_text.tag_names():
+                    self.res_text.tag_configure(url_tag, foreground=GREEN,
+                                                font=FN_MONO, underline=True)
+                    self.res_text.tag_bind(url_tag, "<Button-1>",  self._on_url_click)
+                    self.res_text.tag_bind(url_tag, "<Enter>",
+                                           lambda e: self.res_text.config(cursor="hand2"))
+                    self.res_text.tag_bind(url_tag, "<Leave>",
+                                           lambda e: self.res_text.config(cursor="arrow"))
+                self.res_text.insert("end", f"     {url}\n", ("url", url_tag))
                 if snip:
                     self.res_text.insert("end", f"     {snip}\n", "body")
                 idx += 1
 
         self.res_text.config(state="disabled")
         self.res_count_var.set(f"{len(results)} results  ·  {len(cats)} categories")
+
+    def _on_url_click(self, event):
+        """Open URL under the cursor when clicked in the results pane."""
+        idx = self.res_text.index(f"@{event.x},{event.y}")
+        for tag in self.res_text.tag_names(idx):
+            if tag.startswith("url_"):
+                url = tag[4:]
+                webbrowser.open(url)
+                return
 
     # ==================================================================
     # AI ANALYSIS TAB
@@ -619,19 +673,32 @@ class OSINTNewsApp:
         opt("Provider")
         self.ai_provider_var = tk.StringVar(value=self.settings.get("ai_provider", "claude"))
         provider_cb = ttk.Combobox(f, textvariable=self.ai_provider_var,
-                     values=["claude", "openai", "ollama"],
+                     values=["claude", "openai", "gemini", "ollama"],
                      state="readonly", font=FN, width=20)
         provider_cb.pack(anchor="w")
         self.ai_provider_var.trace_add("write", self._on_provider_change)
 
-        opt("API Key", "Stored in data/settings.json — sent only to the chosen provider API.")
+        opt("API Key", "Auto-resolved from ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY env vars if blank.")
         self.ai_key_var = tk.StringVar(value=self.settings.get("ai_api_key", ""))
         self.key_entry  = ttk.Entry(f, textvariable=self.ai_key_var, font=FN_MONO, show="•")
         self.key_entry.pack(fill="x")
 
-        opt("Model", "Leave blank for defaults: claude-sonnet-4-6 / gpt-4o / llama3.2")
+        opt("Model", "Leave blank for defaults: claude-sonnet-4-6 / gpt-4o / gemini-1.5-flash / llama3.2")
         self.ai_model_var = tk.StringVar(value=self.settings.get("ai_model", ""))
         ttk.Entry(f, textvariable=self.ai_model_var, font=FN_MONO).pack(fill="x")
+
+        opt("Max AI Output Tokens")
+        max_tok_row = tk.Frame(f, bg=BG)
+        max_tok_row.pack(fill="x")
+        self.ai_max_tokens_var = tk.IntVar(value=int(self.settings.get("ai_max_tokens", 4000)))
+        self.ai_max_tokens_lbl = tk.Label(max_tok_row, text=str(self.ai_max_tokens_var.get()),
+                                          bg=BG, fg=ACCENT, font=FN_BOLD, width=5)
+        self.ai_max_tokens_lbl.pack(side="right")
+        ttk.Scale(
+            max_tok_row, from_=1000, to=8000,
+            variable=self.ai_max_tokens_var, orient="horizontal",
+            command=lambda v: self.ai_max_tokens_lbl.config(text=str(int(float(v)))),
+        ).pack(fill="x", expand=True)
 
         self.ollama_frame = tk.Frame(f, bg=BG)
         lbl(self.ollama_frame, "Ollama Base URL").pack(anchor="w", pady=(12, 2))
@@ -667,17 +734,18 @@ class OSINTNewsApp:
 
     def _save_settings(self):
         self.settings.update({
-            "output_dir":    self.out_var.get(),
-            "delay":         self.def_delay.get(),
-            "max_results":   self.def_max.get(),
-            "notifications": self.notif_var.get(),
-            "auto_open":     self.auto_open_var.get(),
-            "ai_provider":   self.ai_provider_var.get(),
-            "ai_api_key":    self.ai_key_var.get(),
-            "ai_model":      self.ai_model_var.get(),
-            "ollama_url":    self.ollama_url_var.get(),
-            "ollama_model":  self.ollama_model_var.get(),
-            "auto_ai":       self.auto_ai_s_var.get(),
+            "output_dir":      self.out_var.get(),
+            "delay":           self.def_delay.get(),
+            "max_results":     self.def_max.get(),
+            "notifications":   self.notif_var.get(),
+            "auto_open":       self.auto_open_var.get(),
+            "ai_provider":     self.ai_provider_var.get(),
+            "ai_api_key":      self.ai_key_var.get(),
+            "ai_model":        self.ai_model_var.get(),
+            "ai_max_tokens":   int(self.ai_max_tokens_var.get()),
+            "ollama_url":      self.ollama_url_var.get(),
+            "ollama_model":    self.ollama_model_var.get(),
+            "auto_ai":         self.auto_ai_s_var.get(),
         })
         self._write_settings()
         messagebox.showinfo("Settings", "Settings saved.", parent=self.root)
@@ -685,6 +753,12 @@ class OSINTNewsApp:
     # ==================================================================
     # SEARCH LOGIC
     # ==================================================================
+
+    def cancel_search(self):
+        """Signal the running search to stop after the current query."""
+        self._cancel_event.set()
+        self.cancel_btn.config(state="disabled")
+        self.status_var.set("Cancelling…")
 
     def run_search(self):
         if self._search_thread and self._search_thread.is_alive():
@@ -714,25 +788,48 @@ class OSINTNewsApp:
             all_dorks.extend(build_dorks(t, sel_cats))
 
         self.results = []
+        self._cancel_event.clear()
+        self._search_start  = time.perf_counter()
+        self._search_total  = len(all_dorks)
+        self._search_done   = 0
         self._display_results([])
         self.res_count_var.set("Searching…")
         self.run_btn.config(state="disabled", text="  ⏳  SEARCHING…  ", bg=MUTED)
-        self.progress.start(12)
+        self.cancel_btn.config(state="normal")
+        self.progress_var.set(0)
         self.status_var.set(f"Running {len(all_dorks)} queries…")
         self.nb.select(self.tab_results)
 
+        cancel = self._cancel_event
+
         def _worker():
-            def on_result(r): self.queue.put(("result", r))
-            def on_status(m): self.queue.put(("status", m))
+            # Pre-filter each result in real-time before sending to UI
+            # so Chinese/irrelevant results never appear even briefly
+            def on_result(r):
+                filtered = filter_raw_results([r], min_target_words=2)
+                if filtered:
+                    if not kw_filter or kw_filter in (r.get("title","") + r.get("body","")).lower():
+                        self.queue.put(("result", r))
+
+            def on_status(m):   self.queue.put(("status", m))
+            def on_progress(done, total):
+                self.queue.put(("progress", (done, total)))
             try:
                 results = run_searches_with_callback(
                     all_dorks, max_results=max_results, delay=delay,
                     proxy=proxy, timelimit=timelimit,
                     on_result=on_result, on_status=on_status,
+                    on_progress=on_progress,
+                    stop_event=cancel,
                 )
-                if kw_filter:
-                    results = [r for r in results
-                               if kw_filter in (r.get("title","") + r.get("body","")).lower()]
+                if cancel.is_set():
+                    results = self.results[:]   # keep whatever arrived before cancel
+                else:
+                    # Final pass: deduplicate and re-filter the full result set
+                    results = filter_raw_results(results, min_target_words=2)
+                    if kw_filter:
+                        results = [r for r in results
+                                   if kw_filter in (r.get("title","") + r.get("body","")).lower()]
                 self.queue.put(("done", (results, targets, sel_cats)))
             except Exception as exc:
                 self.queue.put(("error", str(exc)))
@@ -749,13 +846,19 @@ class OSINTNewsApp:
                     self._display_results(self.results)
                 elif msg_type == "status":
                     self.status_var.set(payload)
+                elif msg_type == "progress":
+                    done, total = payload
+                    pct = int(done / total * 100) if total else 0
+                    self.progress_var.set(pct)
+                    self.status_var.set(f"Searching… {done}/{total} queries  ({pct}%)")
                 elif msg_type == "done":
                     results, targets, cats = payload
                     self.results = results
                     self._on_search_done(results, targets, cats)
                 elif msg_type == "error":
-                    self.progress.stop()
+                    self.progress_var.set(0)
                     self.run_btn.config(state="normal", text="  ▶  RUN SEARCH  ", bg=ACCENT)
+                    self.cancel_btn.config(state="disabled")
                     messagebox.showerror("Search Error", payload, parent=self.root)
                     self.status_var.set("Error.")
         except Empty:
@@ -763,14 +866,26 @@ class OSINTNewsApp:
         self.root.after(100, self._poll_queue)
 
     def _on_search_done(self, results: list, targets: list, cats: list):
-        self.progress.stop()
+        elapsed = time.perf_counter() - self._search_start
+        self.progress_var.set(100)
         self.run_btn.config(state="normal", text="  ▶  RUN SEARCH  ", bg=ACCENT)
+        self.cancel_btn.config(state="disabled")
         self._display_results(results)
-        self.status_var.set(f"Done  ·  {len(results)} results  ·  {len(targets)} target(s)")
+        was_cancelled = self._cancel_event.is_set()
+        self._cancel_event.clear()
+        cancelled = "  ·  cancelled" if was_cancelled else ""
+        self.status_var.set(
+            f"Done  ·  {len(results)} results  ·  {len(targets)} target(s)"
+            f"  ·  {elapsed:.1f}s{cancelled}"
+        )
 
         report_path = None
         if results:
-            out_dir     = self.settings.get("output_dir", "reports")
+            out_dir = self.settings.get("output_dir", "reports")
+            # Always make the output path absolute so it never hits a
+            # protected directory regardless of where Python was launched from
+            if not os.path.isabs(out_dir):
+                out_dir = os.path.join(ROOT, out_dir)
             target_str  = ", ".join(targets)
             report_path = save_report(results, target_str, out_dir)
             if self.settings.get("auto_open", True):
@@ -804,13 +919,23 @@ class OSINTNewsApp:
             messagebox.showwarning("Busy", "AI analysis is already running.", parent=self.root)
             return
 
-        provider     = self.settings.get("ai_provider",  "claude")
-        api_key      = self.settings.get("ai_api_key",   "")
-        model        = self.settings.get("ai_model",     "")
-        ollama_url   = self.settings.get("ollama_url",   "http://localhost:11434")
-        ollama_model = self.settings.get("ollama_model", "llama3.2")
+        provider     = self.settings.get("ai_provider",   "claude")
+        api_key      = self.settings.get("ai_api_key",    "")
+        model        = self.settings.get("ai_model",      "")
+        max_tokens   = int(self.settings.get("ai_max_tokens", 4000))
+        ollama_url   = self.settings.get("ollama_url",    "http://localhost:11434")
+        ollama_model = self.settings.get("ollama_model",  "llama3.2")
 
-        if provider in ("claude", "openai") and not api_key:
+        # Fallback: resolve from env var if not in settings
+        if not api_key and provider in ("claude", "openai", "gemini"):
+            env_map = {
+                "claude": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "gemini": "GOOGLE_API_KEY",
+            }
+            api_key = os.environ.get(env_map.get(provider, ""), "")
+
+        if provider in ("claude", "openai", "gemini") and not api_key:
             messagebox.showerror("API Key Required",
                 f"Set your {provider.title()} API key in Settings → AI/RAG section.",
                 parent=self.root)
@@ -835,16 +960,31 @@ class OSINTNewsApp:
 
         def _ai_worker():
             try:
-                from modules.rag.pipeline import run_multi_target_pipeline
-                pipeline_results = run_multi_target_pipeline(
-                    raw_results  = raw,
-                    targets      = targets if targets else [target_str],
-                    provider     = provider,
-                    api_key      = api_key,
-                    model        = model,
-                    ollama_url   = ollama_url,
-                    ollama_model = ollama_model,
-                )
+                from modules.rag.pipeline import run_pipeline
+                from modules.rag.retriever import raws_to_bundle, build_retrieval_pipeline
+
+                effective_targets = targets if targets else [target_str]
+                pipeline_results = []
+
+                for tgt in effective_targets:
+                    tgt_results = [r for r in raw if r.get("target", "") == tgt] or raw
+
+                    def on_token(chunk, _tgt=tgt):
+                        self.ai_queue.put(("ai_token", chunk))
+
+                    result = run_pipeline(
+                        raw_results  = tgt_results,
+                        target       = tgt,
+                        provider     = provider,
+                        api_key      = api_key,
+                        model        = model,
+                        max_tokens   = max_tokens,
+                        ollama_url   = ollama_url,
+                        ollama_model = ollama_model,
+                        on_token     = on_token,
+                    )
+                    pipeline_results.append(result)
+
                 self.ai_queue.put(("ai_done", pipeline_results))
             except Exception as exc:
                 self.ai_queue.put(("ai_error", str(exc)))
@@ -857,7 +997,18 @@ class OSINTNewsApp:
             while True:
                 msg_type, payload = self.ai_queue.get_nowait()
 
-                if msg_type == "ai_done":
+                if msg_type == "ai_token":
+                    # Streaming: append each token to the AI text widget live
+                    self.ai_text.config(state="normal")
+                    current = self.ai_text.get("1.0", "end-1c")
+                    # Clear placeholder on first real token
+                    if current.strip().startswith("Analysing"):
+                        self.ai_text.delete("1.0", "end")
+                    self.ai_text.insert("end", payload)
+                    self.ai_text.see("end")
+                    self.ai_text.config(state="disabled")
+
+                elif msg_type == "ai_done":
                     self.progress.stop()
                     pipeline_results = payload
                     primary = pipeline_results[0] if pipeline_results else None
@@ -888,6 +1039,9 @@ class OSINTNewsApp:
                         self._display_ai_analysis(primary.analysis)
                         self.ai_status_var.set(f"Failed: {primary.analysis.error}")
                         self.status_var.set("AI analysis failed.")
+                    else:
+                        self.ai_status_var.set("No results from AI pipeline.")
+                        self.status_var.set("AI analysis returned no results.")
 
                 elif msg_type == "ai_error":
                     self.progress.stop()
@@ -948,6 +1102,15 @@ class OSINTNewsApp:
             except ImportError:
                 messagebox.showerror("Missing Dependency", "Run: pip install openpyxl", parent=self.root)
 
+    def export_markdown(self):
+        if not self._check_results(): return
+        path = filedialog.asksaveasfilename(parent=self.root,
+            defaultextension=".md", filetypes=[("Markdown", "*.md")],
+            initialfile="osintnews_export.md")
+        if path:
+            save_markdown(self.results, path, self._last_analysis)
+            messagebox.showinfo("Export", f"Markdown saved:\n{path}", parent=self.root)
+
     def export_ai_report(self):
         if not self._last_analysis:
             messagebox.showinfo("No Analysis", "Run AI analysis first.", parent=self.root)
@@ -966,16 +1129,33 @@ class OSINTNewsApp:
     # ==================================================================
 
     def _load_settings(self) -> dict:
+        defaults = {
+            "output_dir": os.path.join(ROOT, "reports"), "delay": 1.5, "max_results": 10,
+            "notifications": True, "auto_open": True, "auto_ai": False,
+            "ai_provider": "claude", "ai_api_key": "", "ai_model": "",
+            "ai_max_tokens": 4000,
+            "ollama_url": "http://localhost:11434", "ollama_model": "llama3.2",
+        }
         if os.path.exists(SETTINGS_PATH):
             try:
                 with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
-                    return json.load(fh)
+                    saved = json.load(fh)
+                defaults.update(saved)
             except Exception:
                 pass
-        return {"output_dir": "reports", "delay": 1.5, "max_results": 10,
-                "notifications": True, "auto_open": True, "auto_ai": False,
-                "ai_provider": "claude", "ai_api_key": "", "ai_model": "",
-                "ollama_url": "http://localhost:11434", "ollama_model": "llama3.2"}
+
+        # Resolve API key from env var if not saved in settings
+        if not defaults.get("ai_api_key"):
+            env_map = {
+                "claude": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "gemini": "GOOGLE_API_KEY",
+            }
+            env_name = env_map.get(defaults.get("ai_provider", "claude"), "")
+            if env_name:
+                defaults["ai_api_key"] = os.environ.get(env_name, "")
+
+        return defaults
 
     def _write_settings(self):
         os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)

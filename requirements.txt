@@ -1,6 +1,7 @@
 # Core search engine
-ddgs>=0.1.0
-duckduckgo-search>=6.0.0   # fallback if ddgs not available
+# Install ONE — code tries ddgs first, falls back to duckduckgo-search
+duckduckgo-search>=6.0.0
+# ddgs>=0.1.0              # alternative: uncomment if you prefer the ddgs package
 
 # Terminal & UI helpers
 colorama>=0.4.6
@@ -12,6 +13,7 @@ plyer>=2.1.0
 openpyxl>=3.1.0
 
 # AI / RAG providers — install only what you use:
-anthropic>=0.40.0       # Claude API (recommended)
-openai>=1.50.0          # OpenAI GPT alternative
-requests>=2.31.0        # Ollama local API (free, offline)
+anthropic>=0.49.0          # Claude API (recommended) — claude-sonnet-4-6 etc.
+openai>=1.50.0             # OpenAI GPT alternative
+google-generativeai>=0.8.0 # Google Gemini (NEW) — gemini-1.5-flash / gemini-1.5-pro
+requests>=2.32.0           # Ollama local API (free, offline)
