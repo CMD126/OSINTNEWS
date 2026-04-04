@@ -106,9 +106,9 @@ OSINT_CATEGORIES = {
 
     "E1": {
         "mode":        "email",
-        "name":        "Email on Social Media",
-        "description": "Twitter, Instagram, Facebook, Reddit mentions",
-        "template":    '"{target}" (site:twitter.com OR site:x.com OR site:instagram.com OR site:facebook.com OR site:reddit.com)',
+        "name":        "Email — General Web",
+        "description": "Broad open web search — forums, personal sites, contact pages, directories",
+        "template":    '"{target}" -site:facebook.com -site:instagram.com',
     },
     "E2": {
         "mode":        "email",
@@ -151,33 +151,39 @@ OSINT_CATEGORIES = {
 
     "P1": {
         "mode":        "phone",
-        "name":        "Phone on Social Media",
-        "description": "Public posts mentioning the number",
-        "template":    '"{target}" (site:twitter.com OR site:x.com OR site:facebook.com OR site:instagram.com)',
+        "name":        "Phone — General Web",
+        "description": "Broad open web search for any public mention of the number",
+        "template":    '"{target}" OR "{target_local}" -site:facebook.com -site:instagram.com -site:twitter.com',
     },
     "P2": {
         "mode":        "phone",
-        "name":        "Phone on Directories",
-        "description": "White pages, reverse lookup directories",
-        "template":    '"{target}" (site:whitepages.com OR site:spokeo.com OR site:truepeoplesearch.com OR site:411.com OR site:numberbarn.com)',
+        "name":        "Phone — PT/EU Directories",
+        "description": "Portuguese & European reverse-lookup and white-pages directories",
+        "template":    '"{target}" (site:paginasbrancas.pt OR site:1414.pt OR site:amarelas.pt OR site:listel.pt OR site:infobel.com OR site:numberway.com OR site:118.pt)',
     },
     "P3": {
         "mode":        "phone",
-        "name":        "Phone on Classifieds / Marketplaces",
-        "description": "Craigslist, OLX, Marketplace ads",
-        "template":    '"{target}" (site:craigslist.org OR site:olx.com OR site:ebay.com OR "for sale" OR "contact")',
+        "name":        "Phone — PT/EU Classifieds",
+        "description": "OLX Portugal, CustoJusto and other Iberian classifieds where sellers post numbers",
+        "template":    '"{target}" (site:olx.pt OR site:custojusto.pt OR site:standvirtual.com OR site:imovirtual.com OR site:milanuncios.com OR site:olx.com)',
     },
     "P4": {
         "mode":        "phone",
-        "name":        "Phone in Leak / Paste Sites",
-        "description": "Credential and contact data dumps",
-        "template":    '"{target}" (site:pastebin.com OR "leaked" OR "breach" OR "database dump")',
+        "name":        "Phone — Leak / Paste Sites",
+        "description": "Credential and contact data dumps on paste/breach sites",
+        "template":    '"{target}" (site:pastebin.com OR site:paste.ee OR site:ghostbin.com OR "leaked" OR "breach" OR "database dump" OR "combo")',
     },
     "P5": {
         "mode":        "phone",
-        "name":        "Phone + Business",
-        "description": "Business registrations and contact pages",
-        "template":    '"{target}" ("contact us" OR "call us" OR "business" OR "company" OR site:yelp.com OR site:yellowpages.com)',
+        "name":        "Phone — Business & Contact Pages",
+        "description": "Business registrations, contact pages, personal sites",
+        "template":    '"{target}" ("contacto" OR "contact" OR "telefone" OR "telemovel" OR "ligar" OR "call us" OR "empresa" OR site:linkedin.com)',
+    },
+    "P6": {
+        "mode":        "phone",
+        "name":        "Phone — International Directories",
+        "description": "Global reverse-lookup engines (TrueCaller, Who Called, etc.)",
+        "template":    '"{target}" (site:truecaller.com OR site:whocalledme.com OR site:whycall.me OR site:callername.com OR site:who-called.co.uk OR "reverse lookup")',
     },
 
     # ── PERSON ──────────────────────────────────────────────────────────────
@@ -246,25 +252,49 @@ def categories_for_mode(mode: str) -> dict:
     return {k: v for k, v in OSINT_CATEGORIES.items() if v["mode"] == mode}
 
 
+def _local_phone(target: str) -> str:
+    """
+    Strip a leading country code from a phone number so we can search
+    both formats.  e.g. '+351933288020' → '933288020'
+                        '00351933288020' → '933288020'
+    Falls back to returning the number unchanged if it doesn't look like
+    it has a country code.
+    """
+    import re
+    cleaned = re.sub(r"[\s\-\.\(\)]", "", target)
+    # Remove leading + or 00 followed by 1-3 digit country code
+    m = re.match(r"^(?:\+|00)(\d{1,3})(\d{7,11})$", cleaned)
+    if m:
+        return m.group(2)
+    return cleaned
+
+
 def build_osint_dorks(target: str, selected_keys: list) -> list:
     """
     Build dork dicts for the selected category keys.
-    For email mode, E6 uses the domain part of the address.
+    Special substitutions:
+      {target}       → sanitised target as-is
+      {target_local} → phone number with country code stripped (P1)
+      {domain}       → domain part of an email address (E6)
     """
-    safe = _sanitize(target)
+    safe  = _sanitize(target)
+    local = _local_phone(safe)   # for phone queries
+
     dorks = []
     for key in selected_keys:
         if key not in OSINT_CATEGORIES:
             continue
-        cat = OSINT_CATEGORIES[key]
+        cat  = OSINT_CATEGORIES[key]
         tmpl = cat["template"]
 
-        # Special case: E6 uses the domain, not the full email
+        # E6 uses the domain part of the email
         if key == "E6" and "@" in safe:
             domain = safe.split("@", 1)[1]
-            query = tmpl.replace("{domain}", domain).replace("{target}", safe)
+            query  = tmpl.replace("{domain}", domain).replace("{target}", safe)
         else:
-            query = tmpl.replace("{target}", safe)
+            query = (tmpl
+                     .replace("{target_local}", local)
+                     .replace("{target}",       safe))
 
         dorks.append({
             "category": cat["name"],

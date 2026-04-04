@@ -1,437 +1,502 @@
 """
-OSINTNEWS — OSINT Identity CLI
-================================
-Search social media, forums, leaks and directories for:
-  • Usernames / handles
-  • Email addresses
-  • Phone numbers
-  • Full person names
+OSINTNEWS — CLI Mode
+====================
+Interactive OSINT identity search: usernames, emails, phones, people.
+Powered by DuckDuckGo Google-dork queries across social media, forums,
+breach sites, company records and more.
 
-Run:
+Usage (direct):
   python osintnews.py --cli
-  python osintnews_cli.py
-  python osintnews_cli.py --mode username --target johndoe
-  python osintnews_cli.py --mode email    --target john@example.com
-  python osintnews_cli.py --mode phone    --target "+1 555 123 4567"
-  python osintnews_cli.py --mode person   --target "John Doe"
+  python osintnews.py --cli --mode username --target johndoe
+  python osintnews.py --cli --mode email    --target john@example.com
+  python osintnews.py --cli --mode phone    --target "+351 912 345 678"
+  python osintnews.py --cli --mode person   --target "John Doe"
 """
 
-import sys
+from __future__ import annotations
+
 import os
-import argparse
-import time
+import sys
 import json
-import csv
+import hashlib
+import argparse
+import threading
+from datetime import datetime
 
-# ── Auto-installer ────────────────────────────────────────────────────────────
-try:
-    from modules.installer import ensure_dependencies
-    ensure_dependencies()
-except Exception as _e:
-    print(f"[setup] Auto-install skipped: {_e}", flush=True)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Colour palette ────────────────────────────────────────────────────────────
+_CY  = "\033[96m"
+_GR  = "\033[92m"
+_YL  = "\033[93m"
+_BL  = "\033[94m"
+_WH  = "\033[97m"
+_GY  = "\033[90m"
+_RD  = "\033[91m"
+_MG  = "\033[95m"
+_RS  = "\033[0m"
+_BO  = "\033[1m"
 
-from modules.dorker_osint   import OSINT_CATEGORIES, OSINT_MODES, categories_for_mode, build_osint_dorks
-from modules.searcher        import run_searches_with_callback
-from modules.rag.retriever   import filter_raw_results
-
-try:
-    import colorama
-    colorama.init()
-except ImportError:
-    pass
-
-# ── ANSI colours ─────────────────────────────────────────────────────────────
-G = "\033[92m"   # green
-C = "\033[96m"   # cyan
-Y = "\033[93m"   # yellow
-B = "\033[94m"   # blue
-W = "\033[97m"   # white
-D = "\033[90m"   # dark / grey
-R = "\033[91m"   # red
-P = "\033[95m"   # purple
-X = "\033[0m"    # reset
-
-BANNER = f"""
-{G}
-   ██████╗ ███████╗██╗███╗   ██╗████████╗     ██████╗██╗     ██╗
-  ██╔═══██╗██╔════╝██║████╗  ██║╚══██╔══╝    ██╔════╝██║     ██║
-  ██║   ██║███████╗██║██╔██╗ ██║   ██║       ██║     ██║     ██║
-  ██║   ██║╚════██║██║██║╚██╗██║   ██║       ██║     ██║     ██║
-  ╚██████╔╝███████║██║██║ ╚████║   ██║       ╚██████╗███████╗██║
-   ╚═════╝ ╚══════╝╚═╝╚═╝  ╚═══╝   ╚═╝        ╚═════╝╚══════╝╚═╝
-{X}  {C}OSINT Identity & Social Intelligence Tool{X}
-  {D}Usernames · Emails · Phones · People{X}
-"""
-
-MODE_LABELS = {
-    "username": f"{C}👤 Username{X}",
-    "email":    f"{Y}✉  Email{X}",
-    "phone":    f"{G}📞 Phone{X}",
-    "person":   f"{P}🔍 Person{X}",
-}
-
-MODE_COLORS = {
-    "username": C,
-    "email":    Y,
-    "phone":    G,
-    "person":   P,
-}
+# ── Modes that involve personal identifiers (require consent check) ───────────
+_SENSITIVE_MODES = {"email", "phone", "person"}
 
 
-# ---------------------------------------------------------------------------
-# Interactive helpers
-# ---------------------------------------------------------------------------
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def pick_mode() -> str:
-    print(f"\n{C}  Search mode:{X}\n")
-    items = list(OSINT_MODES.items())
-    for i, (key, label) in enumerate(items, 1):
-        print(f"    {Y}[{i}]{X}  {label}")
-    print(f"\n  {C}Enter number:{X} ", end="")
-    raw = input().strip()
+def _clear():
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def _banner():
+    print(f"""
+{_CY}{_BO}
+  ██████╗ ███████╗██╗███╗  ██╗████████╗███╗  ██╗███████╗██╗    ██╗███████╗
+ ██╔═══██╗██╔════╝██║████╗ ██║╚══██╔══╝████╗ ██║██╔════╝██║    ██║██╔════╝
+ ██║   ██║███████╗██║██╔██╗██║   ██║   ██╔██╗██║█████╗  ██║ █╗ ██║███████╗
+ ██║   ██║╚════██║██║██║╚████║   ██║   ██║╚████║██╔══╝  ██║███╗██║╚════██║
+ ╚██████╔╝███████║██║██║ ╚███║   ██║   ██║ ╚███║███████╗╚███╔███╔╝███████║
+  ╚═════╝ ╚══════╝╚═╝╚═╝  ╚══╝   ╚═╝   ╚═╝  ╚══╝╚══════╝ ╚══╝╚══╝ ╚══════╝
+{_RS}{_GY}                        OSINT Identity Search — CLI Mode{_RS}
+""")
+
+
+def _section(title: str):
+    width = 62
+    print(f"\n{_YL}{'─' * width}{_RS}")
+    print(f"{_YL}  {title}{_RS}")
+    print(f"{_YL}{'─' * width}{_RS}")
+
+
+def _prompt(msg: str, default: str = "") -> str:
+    hint = f" [{default}]" if default else ""
     try:
-        idx = int(raw) - 1
-        if 0 <= idx < len(items):
-            return items[idx][0]
-    except ValueError:
-        pass
-    return "username"
+        val = input(f"  {_WH}{msg}{hint}{_RS}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(0)
+    return val if val else default
 
 
-def pick_categories(mode: str) -> list:
-    cats = categories_for_mode(mode)
-    color = MODE_COLORS.get(mode, C)
-    print(f"\n{color}  Categories for {OSINT_MODES[mode]}:{X}\n")
-    for key, cat in cats.items():
-        print(f"    {Y}[{key:>3}]{X}  {cat['name']:35s}  {D}{cat['description']}{X}")
-    print(f"    {Y}[  A]{X}  All categories\n")
-    print(f"  {C}Select (e.g. U1,U3  or  A for all):{X} ", end="")
-    choice = input().strip().upper()
-
-    all_keys = list(cats.keys())
-    if not choice or choice == "A":
-        return all_keys
-    sel = [c.strip() for c in choice.split(",") if c.strip() in cats]
-    return sel if sel else all_keys
+def _choose(options: list[tuple[str, str]], title: str = "Choose an option") -> str:
+    _section(title)
+    keys = []
+    for i, (key, label) in enumerate(options, 1):
+        print(f"  {_CY}{i}.{_RS} {label}")
+        keys.append(key)
+    while True:
+        raw = _prompt("Enter number")
+        if raw.isdigit() and 1 <= int(raw) <= len(keys):
+            return keys[int(raw) - 1]
+        print(f"  {_RD}Invalid — pick 1–{len(keys)}.{_RS}")
 
 
-# ---------------------------------------------------------------------------
-# Output / display
-# ---------------------------------------------------------------------------
+def _multi_choose(options: list[tuple[str, str]], title: str = "Select categories") -> list[str]:
+    _section(title)
+    keys = []
+    for i, (key, label) in enumerate(options, 1):
+        print(f"  {_CY}{i}.{_RS} {label}")
+        keys.append(key)
 
-def _risk_color(risk: str) -> str:
-    return {"LOW": G, "MEDIUM": Y, "HIGH": R, "CRITICAL": R}.get(risk, D)
+    print(f"\n  {_GY}Enter numbers separated by commas, or press Enter for ALL{_RS}")
+    while True:
+        raw = _prompt("Selection", "all").lower().strip()
+        if raw in ("all", "a", ""):
+            return keys
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        chosen = []
+        valid  = True
+        for p in parts:
+            if p.isdigit() and 1 <= int(p) <= len(keys):
+                chosen.append(keys[int(p) - 1])
+            else:
+                print(f"  {_RD}Invalid entry: '{p}'. Try again.{_RS}")
+                valid = False
+                break
+        if valid and chosen:
+            return chosen
 
 
-def print_results(results: list, target: str, mode: str) -> None:
-    if not results:
-        print(f"\n{R}  [!] No results found for: {target}{X}")
-        return
+# ── Consent gate ──────────────────────────────────────────────────────────────
 
-    color = MODE_COLORS.get(mode, C)
-    cats: dict = {}
+def _consent_check(mode: str, target: str) -> bool:
+    """
+    For sensitive modes (email, phone, person), require the user to confirm
+    they are researching themselves or have explicit consent from the subject.
+    Returns True if the search may proceed, False otherwise.
+    """
+    if mode not in _SENSITIVE_MODES:
+        return True
+
+    _section("⚠  Consent & Legal Check")
+    print(f"""
+  {_YL}You are about to search for personal identifier data:{_RS}
+  {_WH}Mode:{_RS}   {mode.upper()}
+  {_WH}Target:{_RS} {target}
+
+  {_GY}This tool queries only publicly indexed information.
+  Searching personal identifiers (email, phone, full name) without
+  consent may violate GDPR and local privacy laws.{_RS}
+
+  Please confirm ONE of the following applies:
+  {_CY}1.{_RS} This is {_WH}my own{_RS} data — personal footprint audit
+  {_CY}2.{_RS} I have {_WH}explicit written consent{_RS} from the subject
+  {_CY}3.{_RS} This is a {_WH}journalistic / cybersecurity investigation{_RS} with lawful basis
+  {_CY}0.{_RS} {_RD}Cancel — do not proceed{_RS}
+""")
+    raw = _prompt("Confirm (1/2/3 to proceed, 0 to cancel)").strip()
+    if raw in ("1", "2", "3"):
+        return True
+    print(f"\n  {_RD}Search cancelled. No data was queried.{_RS}\n")
+    return False
+
+
+# ── Audit log ─────────────────────────────────────────────────────────────────
+
+def _audit_log(mode: str, target: str, categories: list[str], result_count: int, data_dir: str):
+    """
+    Append a record to data/audit.log.
+    The target is stored as a SHA-256 hash for privacy — not in plaintext.
+    """
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        log_path    = os.path.join(data_dir, "audit.log")
+        target_hash = hashlib.sha256(target.encode()).hexdigest()[:16]
+        timestamp   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = (
+            f"{timestamp} | mode={mode} | target_hash={target_hash} "
+            f"| categories={','.join(categories)} | results={result_count}\n"
+        )
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+    except Exception:
+        pass   # audit log is non-critical
+
+
+# ── Mode selection ─────────────────────────────────────────────────────────────
+
+_MODE_OPTIONS = [
+    ("username", "Username / Handle  — social media, forums, gaming"),
+    ("email",    "Email Address      — breaches, social, professional"),
+    ("phone",    "Phone Number       — directories, classifieds, leaks"),
+    ("person",   "Full Name          — news, legal, academic, social"),
+]
+
+
+def _select_mode() -> str:
+    return _choose(_MODE_OPTIONS, "Search Mode")
+
+
+# ── Category selection ─────────────────────────────────────────────────────────
+
+def _select_categories(mode: str) -> list[str]:
+    from modules.dorker_osint import categories_for_mode
+    cats    = categories_for_mode(mode)
+    options = [(k, f"{v['name']}  — {v['description']}") for k, v in cats.items()]
+    return _multi_choose(options, f"Select search categories for [{mode.upper()}]")
+
+
+# ── Progress display ───────────────────────────────────────────────────────────
+
+_spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+_spin_idx       = 0
+_spin_lock      = threading.Lock()
+
+
+def _on_status(msg: str):
+    global _spin_idx
+    with _spin_lock:
+        frame = _spinner_frames[_spin_idx % len(_spinner_frames)]
+        _spin_idx += 1
+    print(f"\r  {_CY}{frame}{_RS} {_GY}{msg[:78]}{_RS}    ", end="", flush=True)
+
+
+def _on_progress(done: int, total: int):
+    pct = int(done / total * 100) if total else 100
+    bar = ("█" * (pct // 5)).ljust(20)
+    print(f"\r  {_GR}[{bar}]{_RS} {_WH}{pct}%{_RS} ({done}/{total})    ",
+          end="", flush=True)
+
+
+# ── Username correlation ───────────────────────────────────────────────────────
+
+def _username_correlation(results: list, target: str):
+    """
+    After a username search, print a correlation summary:
+    which platforms confirmed a presence, which found nothing.
+    """
+    from modules.dorker_osint import categories_for_mode
+    cats = categories_for_mode("username")
+
+    hits: dict[str, list] = {}
     for r in results:
-        cats.setdefault(r.get("category", "Unknown"), []).append(r)
+        cat = r.get("category", "Unknown")
+        hits.setdefault(cat, []).append(r)
 
-    print(f"\n{color}{'═' * 70}{X}")
-    print(f"{color}  {OSINT_MODES.get(mode, mode)}: {W}{target}{X}"
-          f"  {D}|{X}  {W}{len(results)}{X} results  {D}across {len(cats)} sources{X}")
-    print(f"{color}{'═' * 70}{X}")
+    _section("Username Correlation Summary")
+    print(f"\n  {_WH}Target:{_RS} {_CY}{target}{_RS}\n")
 
-    idx = 1
-    for cat, items in cats.items():
-        print(f"\n{Y}  ▸ {cat}{X}  {D}({len(items)}){X}")
-        print(f"  {D}{'─' * 60}{X}")
-        for r in items:
-            title   = r.get("title", "No title")
-            url     = r.get("href",  "")
-            body    = (r.get("body", "") or "")
-            snippet = (body[:180] + "…") if len(body) > 180 else body
+    confirmed = []
+    empty     = []
 
-            print(f"\n  {D}{idx}.{X} {W}{title}{X}")
-            print(f"     {B}{url}{X}")
-            if snippet:
-                print(f"     {D}{snippet}{X}")
-            idx += 1
+    for key, meta in cats.items():
+        name = meta["name"]
+        found = hits.get(name, [])
+        if found:
+            confirmed.append((name, found))
+        else:
+            empty.append(name)
+
+    if confirmed:
+        print(f"  {_GR}● Presence detected on:{_RS}")
+        for name, items in confirmed:
+            urls = [r.get("href", "") for r in items if r.get("href")]
+            print(f"    {_WH}{name}{_RS}  ({len(items)} result{'s' if len(items) != 1 else ''})")
+            for url in urls[:2]:
+                print(f"      {_BL}{url}{_RS}")
+    else:
+        print(f"  {_GY}● No confirmed presence found on any searched platform.{_RS}")
+
+    if empty:
+        print(f"\n  {_GY}○ No results on:{_RS} {', '.join(empty)}")
+
+    # Risk assessment
+    count = len(confirmed)
+    if count == 0:
+        level, colour = "LOW",      _GR
+    elif count <= 3:
+        level, colour = "MEDIUM",   _YL
+    elif count <= 6:
+        level, colour = "HIGH",     _MG
+    else:
+        level, colour = "CRITICAL", _RD
+
+    print(f"\n  {_WH}Exposure level:{_RS} {colour}{_BO}{level}{_RS}  "
+          f"{_GY}({count} platform{'s' if count != 1 else ''} with results){_RS}")
+
+    if count >= 4:
+        print(f"\n  {_YL}⚠  Consider reviewing and limiting your public footprint.{_RS}")
+        print(f"  {_GY}Tip: Use different usernames per platform to prevent cross-correlation.{_RS}")
 
 
-def save_results(results: list, target: str, mode: str,
-                 output_dir: str, fmt: str = "json") -> str:
-    os.makedirs(output_dir, exist_ok=True)
-    safe   = "".join(c if c.isalnum() or c in "-_" else "_" for c in target)
-    ts     = time.strftime("%Y%m%d_%H%M%S")
-    path   = os.path.join(output_dir, f"osint_{mode}_{safe}_{ts}.{fmt}")
+# ── Export helpers ─────────────────────────────────────────────────────────────
 
-    if fmt == "json":
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"target": target, "mode": mode,
-                       "count": len(results), "results": results},
-                      fh, indent=2, ensure_ascii=False)
+def _save_spiderfoot_json(results: list, target: str, path: str) -> str:
+    """
+    Export results in SpiderFoot-compatible JSON format.
+    SpiderFoot expects a list of events with type, data, source, confidence.
+    """
+    events = []
+    for r in results:
+        url     = r.get("href",     "")
+        title   = r.get("title",    "")
+        body    = r.get("body",     "") or ""
+        cat     = r.get("category", "OSINT")
+        mode    = r.get("mode",     "username")
 
-    elif fmt == "csv":
-        fields = ["category", "title", "href", "body", "query"]
-        with open(path, "w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(results)
+        # Map OSINTNEWS mode to SpiderFoot event types
+        sf_type_map = {
+            "username": "SOCIAL_MEDIA",
+            "email":    "EMAILADDR_COMPROMISED",
+            "phone":    "PHONE_NUMBER",
+            "person":   "HUMAN_NAME",
+        }
+        sf_type = sf_type_map.get(mode, "LINKED_URL_INTERNAL")
 
-    elif fmt == "txt":
-        cats: dict = {}
-        for r in results:
-            cats.setdefault(r.get("category", "Unknown"), []).append(r)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(f"OSINT Report — {OSINT_MODES.get(mode, mode)}: {target}\n")
-            fh.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            fh.write("=" * 70 + "\n\n")
-            for cat, items in cats.items():
-                fh.write(f"\n▸ {cat} ({len(items)})\n")
-                fh.write("─" * 60 + "\n")
-                for i, r in enumerate(items, 1):
-                    fh.write(f"\n{i}. {r.get('title', 'No title')}\n")
-                    fh.write(f"   {r.get('href', '')}\n")
-                    body = (r.get("body", "") or "")[:200]
-                    if body:
-                        fh.write(f"   {body}\n")
+        events.append({
+            "type":       sf_type,
+            "data":       url or title,
+            "source":     "OSINTNEWS-CLI",
+            "module":     f"osintnews_{cat.lower().replace(' ', '_')}",
+            "confidence": 75,
+            "visibility": 1,
+            "risk":       "INFO",
+            "generated":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "target":     target,
+            "title":      title,
+            "snippet":    body[:300],
+            "url":        url,
+        })
+
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(events, fh, indent=2, ensure_ascii=False)
     return path
 
 
-# ---------------------------------------------------------------------------
-# AI analysis (optional, reuses RAG pipeline)
-# ---------------------------------------------------------------------------
-
-def run_ai(results: list, target: str, mode: str,
-           provider: str, api_key: str, model: str,
-           max_tokens: int, ollama_url: str, ollama_model: str) -> None:
+def _offer_export(results: list, target: str, reports_dir: str):
     if not results:
-        print(f"\n{R}[!] No results to analyse.{X}")
         return
 
-    print(f"\n{P}[AI]{X} Running intelligence analysis via {W}{provider}{X}…")
+    _section("Export Results")
+    print(f"  {_GY}Choose export formats (comma-separated numbers, or Enter to skip):{_RS}\n")
+    print(f"  {_CY}1.{_RS} HTML       (styled dark-theme report)")
+    print(f"  {_CY}2.{_RS} JSON       (standard)")
+    print(f"  {_CY}3.{_RS} CSV")
+    print(f"  {_CY}4.{_RS} Markdown")
+    print(f"  {_CY}5.{_RS} SpiderFoot JSON  (compatible with SpiderFoot / theHarvester pipelines)")
+
+    raw = _prompt("Formats", "").lower().strip()
+    if not raw:
+        print(f"\n  {_GY}Skipped export.{_RS}")
+        return
+
+    from modules.reporter import save_report, save_json, save_csv, save_markdown
+
+    os.makedirs(reports_dir, exist_ok=True)
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in target)
+
+    for part in [p.strip() for p in raw.split(",") if p.strip()]:
+        if part == "1":
+            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.html")
+            save_report(results, target, output_dir=reports_dir)
+            print(f"  {_GR}✔{_RS} HTML       → {_BL}{path}{_RS}")
+        elif part == "2":
+            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.json")
+            save_json(results, path)
+            print(f"  {_GR}✔{_RS} JSON       → {_BL}{path}{_RS}")
+        elif part == "3":
+            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.csv")
+            save_csv(results, path)
+            print(f"  {_GR}✔{_RS} CSV        → {_BL}{path}{_RS}")
+        elif part == "4":
+            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.md")
+            save_markdown(results, path)
+            print(f"  {_GR}✔{_RS} Markdown   → {_BL}{path}{_RS}")
+        elif part == "5":
+            path = os.path.join(reports_dir, f"osint_{safe}_{ts}_spiderfoot.json")
+            _save_spiderfoot_json(results, target, path)
+            print(f"  {_GR}✔{_RS} SpiderFoot → {_BL}{path}{_RS}")
+            print(f"     {_GY}Load in SpiderFoot: Investigations → Import Data → JSON{_RS}")
+
+
+# ── History helpers ────────────────────────────────────────────────────────────
+
+def _save_history(target: str, mode: str, result_count: int, data_dir: str):
     try:
-        from modules.rag.pipeline import run_pipeline
+        from modules.history import HistoryManager
+        hist = HistoryManager(os.path.join(data_dir, "osint_history.json"))
+        hist.add({
+            "target":       target,
+            "mode":         mode,
+            "result_count": result_count,
+        })
+    except Exception:
+        pass
 
-        def on_token(chunk):
-            print(chunk, end="", flush=True)
 
-        result = run_pipeline(
-            raw_results  = results,
-            target       = target,
-            provider     = provider,
-            api_key      = api_key,
-            model        = model,
-            max_tokens   = max_tokens,
-            ollama_url   = ollama_url,
-            ollama_model = ollama_model,
-            on_token     = on_token if provider in ("claude", "openai", "gemini", "ollama") else None,
+# ── Core search flow ───────────────────────────────────────────────────────────
+
+def _run_search(mode: str, target: str, category_keys: list[str],
+                reports_dir: str, data_dir: str, skip_consent: bool = False):
+    # Consent check for sensitive modes
+    if not skip_consent and not _consent_check(mode, target):
+        return
+
+    from modules.dorker_osint import build_osint_dorks
+    from modules.searcher     import run_searches_with_callback
+    from modules.reporter     import print_results
+
+    dorks = build_osint_dorks(target, category_keys)
+    if not dorks:
+        print(f"\n  {_RD}[!] No dork templates found for the selected categories.{_RS}")
+        return
+
+    _section(f"Searching  [{mode.upper()}]  target: {target}")
+    print(f"  {_GY}Querying {len(dorks)} dork(s) across {len(category_keys)} "
+          f"categorie(s)…{_RS}\n")
+
+    stop_event = threading.Event()
+    results: list = []
+
+    try:
+        results = run_searches_with_callback(
+            dorks,
+            max_results = 10,
+            delay       = 1.2,
+            on_status   = _on_status,
+            on_progress = _on_progress,
+            max_workers = 3,
+            stop_event  = stop_event,
         )
+    except KeyboardInterrupt:
+        stop_event.set()
+        print(f"\n\n  {_YL}[!] Search cancelled by user.{_RS}")
 
-        analysis  = result.analysis
-        risk_col  = _risk_color(analysis.risk_level)
+    print("\n")
 
-        if provider not in ("claude", "openai", "gemini", "ollama"):
-            print(analysis.summary)
+    # Standard result display
+    print_results(results, target)
 
-        print(f"\n\n{risk_col}{'═' * 60}{X}")
-        print(f"{risk_col}  Risk Level : {analysis.risk_level}{X}")
-        print(f"{D}  Model      : {analysis.model}{X}")
-        print(f"{D}  Sources    : {analysis.source_count} analysed  ·  "
-              f"{len(analysis.cited_sources)} cited{X}")
-        if analysis.cited_sources:
-            print(f"\n{C}  Cited Sources:{X}")
-            for i, url in enumerate(analysis.cited_sources, 1):
-                print(f"    {D}[{i}]{X} {B}{url}{X}")
-        print(f"{risk_col}{'═' * 60}{X}")
+    # Username correlation summary (only for username mode)
+    if mode == "username" and results:
+        _username_correlation(results, target)
 
-    except Exception as exc:
-        print(f"\n{R}[!] AI error: {exc}{X}")
+    # Audit log (target stored as hash, not plaintext)
+    _audit_log(mode, target, category_keys, len(results), data_dir)
+
+    # History
+    _save_history(target, mode, len(results), data_dir)
+
+    # Export
+    _offer_export(results, target, reports_dir)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ── Interactive loop ───────────────────────────────────────────────────────────
+
+def _interactive(reports_dir: str, data_dir: str):
+    while True:
+        _banner()
+
+        mode   = _select_mode()
+        target = _prompt(f"Enter {mode} to search")
+        if not target:
+            print(f"  {_RD}Target cannot be empty.{_RS}")
+            continue
+
+        category_keys = _select_categories(mode)
+
+        _run_search(mode, target, category_keys, reports_dir, data_dir)
+
+        print()
+        again = _prompt("Run another search? [y/N]", "n").lower()
+        if again not in ("y", "yes"):
+            print(f"\n  {_CY}Goodbye!{_RS}\n")
+            break
+
+
+# ── Argument-driven entry point ────────────────────────────────────────────────
 
 def main():
-    print(BANNER)
-
-    _root = os.path.dirname(os.path.abspath(__file__))
-    os.makedirs(os.path.join(_root, "data"),    exist_ok=True)
-    os.makedirs(os.path.join(_root, "reports"), exist_ok=True)
+    base_dir    = os.path.dirname(os.path.abspath(__file__))
+    reports_dir = os.path.join(base_dir, "reports")
+    data_dir    = os.path.join(base_dir, "data")
 
     parser = argparse.ArgumentParser(
-        description="OSINTNEWS CLI — OSINT Identity Search",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python osintnews_cli.py --mode username --target johndoe
-  python osintnews_cli.py --mode email    --target john@example.com
-  python osintnews_cli.py --mode phone    --target "+1 555 123 4567"
-  python osintnews_cli.py --mode person   --target "John Doe"
-  python osintnews_cli.py --mode username --target hacker99 --ai --provider claude
-        """,
+        prog        = "osintnews --cli",
+        description = "OSINTNEWS CLI — OSINT Identity Search",
+        add_help    = True,
     )
+    parser.add_argument("--mode",   choices=["username", "email", "phone", "person"])
+    parser.add_argument("--target", help="Target value to search for")
+    parser.add_argument("--all-categories", action="store_true")
+    parser.add_argument("--ai",      action="store_true")
+    parser.add_argument("--provider")
+    parser.add_argument("--skip-consent", action="store_true",
+                        help="Skip consent prompt (use only when you have confirmed consent)")
 
-    # ── Target & mode ──
-    parser.add_argument("-t", "--target",     help="Search target")
-    parser.add_argument("-m", "--mode",
-                        choices=["username", "email", "phone", "person"],
-                        help="Search mode (username / email / phone / person)")
-    parser.add_argument("-c", "--categories", help="Categories (e.g. U1,U3 or A)")
+    args, _ = parser.parse_known_args()
 
-    # ── Search options ──
-    parser.add_argument("--max-results",  type=int,   default=10,
-                        help="Max results per category (default: 10)")
-    parser.add_argument("--delay",        type=float, default=1.0,
-                        help="Seconds between queries (default: 1.0)")
-    parser.add_argument("--workers",      type=int,   default=4,
-                        help="Parallel search workers (default: 4)")
-    parser.add_argument("--no-save",      action="store_true",
-                        help="Do not save results to file")
-    parser.add_argument("--format",       default="json",
-                        choices=["json", "csv", "txt"],
-                        help="Output format (default: json)")
-    parser.add_argument("-o", "--output", default="reports",
-                        help="Output directory (default: reports)")
+    if args.mode and args.target:
+        from modules.dorker_osint import categories_for_mode
+        keys = list(categories_for_mode(args.mode).keys())
+        _banner()
+        _run_search(args.mode, args.target, keys, reports_dir, data_dir,
+                    skip_consent=args.skip_consent)
+        return
 
-    # ── AI options ──
-    parser.add_argument("--ai",           action="store_true",
-                        help="Run AI intelligence analysis on results")
-    parser.add_argument("--provider",     default="claude",
-                        choices=["claude", "openai", "gemini", "ollama"],
-                        help="AI provider (default: claude)")
-    parser.add_argument("--api-key",      default="",
-                        help="API key (or set ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY)")
-    parser.add_argument("--model",        default="",
-                        help="Model name (blank = provider default)")
-    parser.add_argument("--max-tokens",   type=int, default=4000,
-                        help="Max AI output tokens (default: 4000)")
-    parser.add_argument("--ollama-url",   default="http://localhost:11434")
-    parser.add_argument("--ollama-model", default="llama3.2")
-
-    args = parser.parse_args()
-
-    # ── Resolve API key from env ──
-    if not args.api_key:
-        env_map = {
-            "claude": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "gemini": "GOOGLE_API_KEY",
-        }
-        env_name = env_map.get(args.provider, "")
-        if env_name:
-            args.api_key = os.environ.get(env_name, "")
-
-    # ── Interactive: pick mode ──
-    if args.mode:
-        mode = args.mode
-    else:
-        mode = pick_mode()
-
-    print(f"\n  {G}[*]{X} Mode     : {MODE_LABELS.get(mode, mode)}")
-
-    # ── Interactive: pick target ──
-    if args.target:
-        target = args.target.strip()
-    else:
-        color = MODE_COLORS.get(mode, C)
-        prompts = {
-            "username": "Username / handle",
-            "email":    "Email address",
-            "phone":    "Phone number (with country code)",
-            "person":   "Full name",
-        }
-        print(f"\n  {color}{prompts.get(mode, 'Target')}:{X} ", end="")
-        target = input().strip()
-
-    if not target:
-        print(f"\n{R}[!] No target provided. Exiting.{X}")
-        sys.exit(1)
-
-    print(f"  {G}[*]{X} Target   : {W}{target}{X}")
-
-    # ── Pick categories ──
-    cats_for_mode = categories_for_mode(mode)
-    if args.categories:
-        if args.categories.upper() == "A":
-            sel = list(cats_for_mode.keys())
-        else:
-            sel = [c.strip() for c in args.categories.split(",")
-                   if c.strip() in cats_for_mode]
-            if not sel:
-                print(f"  {R}[!] Invalid categories — using all.{X}")
-                sel = list(cats_for_mode.keys())
-    else:
-        sel = pick_categories(mode)
-
-    if not sel:
-        print(f"\n{R}[!] No categories selected. Exiting.{X}")
-        sys.exit(1)
-
-    print(f"  {G}[*]{X} Sources  : {W}{len(sel)}{X} categories")
-    print(f"  {G}[*]{X} Workers  : {W}{args.workers}{X} parallel")
-
-    # ── Build & run dorks ──
-    dorks = build_osint_dorks(target, sel)
-    print(f"\n  {G}[*]{X} Running {W}{len(dorks)}{X} queries…")
-    print(f"  {D}{'─' * 60}{X}")
-
-    t0 = time.perf_counter()
-
-    def on_status(msg):
-        print(f"  {D}{msg}{X}")
-
-    results = run_searches_with_callback(
-        dorks,
-        max_results = args.max_results,
-        delay       = args.delay,
-        max_workers = args.workers,
-        on_status   = on_status,
-    )
-
-    elapsed = time.perf_counter() - t0
-
-    # ── Filter irrelevant results ──
-    raw_count = len(results)
-    results   = filter_raw_results(results, min_target_words=1)
-    filtered  = raw_count - len(results)
-
-    print(f"\n  {D}{'─' * 60}{X}")
-    print(f"  {G}[✓]{X} Done in {W}{elapsed:.1f}s{X}  ·  "
-          f"{W}{len(results)}{X} results", end="")
-    if filtered:
-        print(f"  {D}({filtered} irrelevant filtered){X}")
-    else:
-        print()
-
-    # ── Display ──
-    print_results(results, target, mode)
-
-    # ── Save ──
-    if not args.no_save and results:
-        out_dir = args.output
-        if not os.path.isabs(out_dir):
-            out_dir = os.path.join(_root, out_dir)
-        path = save_results(results, target, mode, out_dir, args.format)
-        print(f"\n{G}[+]{X} Saved  : {C}{path}{X}")
-
-    # ── AI analysis ──
-    if args.ai:
-        if args.provider in ("claude", "openai", "gemini") and not args.api_key:
-            print(f"\n{R}[!] --api-key required for '{args.provider}'.{X}")
-        else:
-            run_ai(
-                results      = results,
-                target       = target,
-                mode         = mode,
-                provider     = args.provider,
-                api_key      = args.api_key,
-                model        = args.model,
-                max_tokens   = args.max_tokens,
-                ollama_url   = args.ollama_url,
-                ollama_model = args.ollama_model,
-            )
-
-    print(f"\n{G}[+]{X} Total: {W}{len(results)}{X} results  ·  {W}{elapsed:.1f}s{X}\n")
+    try:
+        _interactive(reports_dir, data_dir)
+    except KeyboardInterrupt:
+        print(f"\n\n  {_CY}Exiting OSINTNEWS CLI.{_RS}\n")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
