@@ -1,19 +1,27 @@
-# Core search engine
-# Install ONE — code tries ddgs first, falls back to duckduckgo-search
-duckduckgo-search>=6.0.0
-# ddgs>=0.1.0              # alternative: uncomment if you prefer the ddgs package
+# ─────────────────────────────────────────────────────────────────────────────
+#  OSINTNEWS — dependencies
+#  Install everything:      pip install -r requirements.txt
+#  Minimum to run:          pip install ddgs colorama
+#  The auto-installer (modules/installer.py) also installs the Core block on
+#  first launch, so a manual pip is only needed for offline / locked-down setups.
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Terminal & UI helpers
-colorama>=0.4.6
+# ── Core (required) ──────────────────────────────────────────────────────────
+ddgs>=6.0.0            # search engine — modern package (was duckduckgo-search)
+colorama>=0.4.6        # terminal colours + Windows ANSI fix
 
-# Windows notifications (optional — fails silently if not installed)
-plyer>=2.1.0
+# ── Recommended ──────────────────────────────────────────────────────────────
+requests>=2.32.0       # Ollama local API + generic HTTP
+openpyxl>=3.1.0        # Excel (.xlsx) export in the GUI
 
-# Excel export
-openpyxl>=3.1.0
+# ── Optional: desktop notifications ──────────────────────────────────────────
+plyer>=2.1.0           # Windows toast notifications (fails silently if absent)
 
-# AI / RAG providers — install only what you use:
-anthropic>=0.49.0          # Claude API (recommended) — claude-sonnet-4-6 etc.
-openai>=1.50.0             # OpenAI GPT alternative
-google-generativeai>=0.8.0 # Google Gemini (NEW) — gemini-1.5-flash / gemini-1.5-pro
-requests>=2.32.0           # Ollama local API (free, offline)
+# ── Optional: AI / RAG providers — install only the one(s) you use ───────────
+anthropic>=0.49.0             # Claude   — ANTHROPIC_API_KEY   (recommended)
+openai>=1.50.0                # OpenAI   — OPENAI_API_KEY
+google-generativeai>=0.8.0    # Gemini   — GOOGLE_API_KEY
+# Ollama needs no package — just a running local server (see --provider ollama)
+
+# ── Dev only: run the test suite with `pytest` ──────────────────────────────
+pytest>=7.0.0

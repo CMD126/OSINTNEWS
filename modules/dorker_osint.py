@@ -7,8 +7,16 @@ Used by the CLI tool (osintnews_cli.py) for searching:
   - Phone numbers
   - Full person names
 
-Separate from dorker.py which is used by the GUI news tool.
+Separate from dorker.py which is used by the GUI news tool, but shares the
+query mechanics in modules/dork_common.py.
 """
+
+from modules.dork_common import (
+    build_queries,
+    email_domain,
+    local_phone,
+    sanitize_target,
+)
 
 # ---------------------------------------------------------------------------
 # Search modes
@@ -243,8 +251,10 @@ OSINT_CATEGORIES = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sanitize(target: str) -> str:
-    return target.replace('"', '').strip()
+# Backwards-compatible aliases — the mechanics now live in dork_common.
+_sanitize     = sanitize_target
+_local_phone  = local_phone
+_email_domain = email_domain
 
 
 def categories_for_mode(mode: str) -> dict:
@@ -252,54 +262,12 @@ def categories_for_mode(mode: str) -> dict:
     return {k: v for k, v in OSINT_CATEGORIES.items() if v["mode"] == mode}
 
 
-def _local_phone(target: str) -> str:
-    """
-    Strip a leading country code from a phone number so we can search
-    both formats.  e.g. '+351933288020' → '933288020'
-                        '00351933288020' → '933288020'
-    Falls back to returning the number unchanged if it doesn't look like
-    it has a country code.
-    """
-    import re
-    cleaned = re.sub(r"[\s\-\.\(\)]", "", target)
-    # Remove leading + or 00 followed by 1-3 digit country code
-    m = re.match(r"^(?:\+|00)(\d{1,3})(\d{7,11})$", cleaned)
-    if m:
-        return m.group(2)
-    return cleaned
-
-
 def build_osint_dorks(target: str, selected_keys: list) -> list:
     """
     Build dork dicts for the selected category keys.
-    Special substitutions:
+    Placeholders handled by dork_common.build_queries:
       {target}       → sanitised target as-is
-      {target_local} → phone number with country code stripped (P1)
+      {target_local} → phone number with the country calling code removed
       {domain}       → domain part of an email address (E6)
     """
-    safe  = _sanitize(target)
-    local = _local_phone(safe)   # for phone queries
-
-    dorks = []
-    for key in selected_keys:
-        if key not in OSINT_CATEGORIES:
-            continue
-        cat  = OSINT_CATEGORIES[key]
-        tmpl = cat["template"]
-
-        # E6 uses the domain part of the email
-        if key == "E6" and "@" in safe:
-            domain = safe.split("@", 1)[1]
-            query  = tmpl.replace("{domain}", domain).replace("{target}", safe)
-        else:
-            query = (tmpl
-                     .replace("{target_local}", local)
-                     .replace("{target}",       safe))
-
-        dorks.append({
-            "category": cat["name"],
-            "query":    query,
-            "target":   target,
-            "mode":     cat["mode"],
-        })
-    return dorks
+    return build_queries(target, selected_keys, OSINT_CATEGORIES)

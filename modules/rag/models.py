@@ -69,7 +69,7 @@ class AIAnalysis:
     risk_level:     str          # LOW / MEDIUM / HIGH / CRITICAL / UNKNOWN
     cited_sources:  tuple[str, ...]  # URLs cited in the analysis
     timestamp:      str
-    model:          str          # e.g. "claude-sonnet-4-6", "gpt-4o", "ollama/llama3.2"
+    model:          str          # e.g. "claude-sonnet-5", "gpt-5", "ollama/llama3.2"
     source_count:   int          # Number of sources fed to the LLM
     error:          Optional[str] = None
 

@@ -58,6 +58,23 @@ class HistoryManager:
                     return e
             return None
 
+    def update(self, entry_id: str, **fields) -> dict | None:
+        """
+        Merge `fields` into the entry with the given id and persist.
+        Returns the updated entry, or None if no entry matches.
+
+        Preferred over reaching into `.entries[-1]` + `._save()` from callers:
+        it targets a specific entry by id, so a second search starting before
+        an async task (e.g. AI analysis) finishes cannot clobber the wrong row.
+        """
+        with self._lock:
+            for e in self.entries:
+                if e.get("id") == entry_id:
+                    e.update(fields)
+                    self._save()
+                    return dict(e)
+            return None
+
     def delete(self, entry_id: str):
         with self._lock:
             self.entries = [e for e in self.entries if e.get("id") != entry_id]

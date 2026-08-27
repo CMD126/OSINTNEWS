@@ -1,7 +1,15 @@
 """
 Dork query builder - all Google-style dork templates.
 Supports custom date ranges via the after: operator.
+
+Query mechanics (sanitising, {target} substitution) live in
+modules/dork_common.py and are shared with the CLI identity tool.
 """
+
+from modules.dork_common import build_queries, sanitize_target
+
+# Backwards-compatible alias — some older code / notebooks import this name.
+_sanitize_target = sanitize_target
 
 DORK_CATEGORIES = {
     "1": {
@@ -97,26 +105,6 @@ DORK_CATEGORIES = {
 }
 
 
-def _sanitize_target(target: str) -> str:
-    """
-    Sanitize a target string for safe insertion into dork queries.
-    Strips characters that could break dork syntax or inject operators.
-    """
-    # Remove double-quotes (which would break the quoted target phrase)
-    sanitized = target.replace('"', '')
-    # Strip leading/trailing whitespace
-    return sanitized.strip()
-
-
 def build_dorks(target: str, selected: list) -> list:
     """Build dork dicts for the selected category keys and target string."""
-    safe_target = _sanitize_target(target)
-    return [
-        {
-            "category": DORK_CATEGORIES[key]["name"],
-            "query": DORK_CATEGORIES[key]["template"].replace("{target}", safe_target),
-            "target": target,
-        }
-        for key in selected
-        if key in DORK_CATEGORIES
-    ]
+    return build_queries(target, selected, DORK_CATEGORIES)

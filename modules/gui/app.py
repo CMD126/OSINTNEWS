@@ -90,9 +90,10 @@ class OSINTNewsApp:
         os.makedirs(os.path.join(ROOT, "data"),    exist_ok=True)
         os.makedirs(os.path.join(ROOT, "reports"), exist_ok=True)
 
-        self.history        = HistoryManager(HISTORY_PATH)
-        self.settings       = self._load_settings()
-        self._last_analysis = None   # latest AIAnalysis object
+        self.history          = HistoryManager(HISTORY_PATH)
+        self.settings         = self._load_settings()
+        self._last_analysis   = None   # latest AIAnalysis object
+        self._last_history_id = None   # id of the history row for the last search
 
         self._setup_window()
         self._setup_styles()
@@ -683,7 +684,7 @@ class OSINTNewsApp:
         self.key_entry  = ttk.Entry(f, textvariable=self.ai_key_var, font=FN_MONO, show="•")
         self.key_entry.pack(fill="x")
 
-        opt("Model", "Leave blank for defaults: claude-sonnet-4-6 / gpt-4o / gemini-1.5-flash / llama3.2")
+        opt("Model", "Leave blank for defaults: claude-sonnet-5 / gpt-5 / gemini-2.5-flash / llama3.2")
         self.ai_model_var = tk.StringVar(value=self.settings.get("ai_model", ""))
         ttk.Entry(f, textvariable=self.ai_model_var, font=FN_MONO).pack(fill="x")
 
@@ -891,13 +892,14 @@ class OSINTNewsApp:
             if self.settings.get("auto_open", True):
                 webbrowser.open(f"file:///{os.path.abspath(report_path)}")
 
-        self.history.add({
+        entry = self.history.add({
             "targets":      ", ".join(targets),
             "categories":   len(cats),
             "result_count": len(results),
             "report_path":  report_path or "",
             "risk_level":   "—",
         })
+        self._last_history_id = entry.get("id")
         self._hist_refresh()
 
         if self.settings.get("notifications", True):
@@ -1025,10 +1027,10 @@ class OSINTNewsApp:
                         self._display_ai_analysis(analysis)
                         self.status_var.set(f"AI analysis complete — Risk: {analysis.risk_level}")
 
-                        # Update latest history entry with risk level
-                        if self.history.entries:
-                            self.history.entries[-1]["risk_level"] = analysis.risk_level
-                            self.history._save()
+                        # Tag the originating history row with the risk level
+                        if self._last_history_id:
+                            self.history.update(self._last_history_id,
+                                                risk_level=analysis.risk_level)
                             self._hist_refresh()
 
                         if self.settings.get("notifications", True):

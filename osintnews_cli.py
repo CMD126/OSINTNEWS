@@ -16,12 +16,20 @@ Usage (direct):
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
 import hashlib
 import argparse
 import threading
 from datetime import datetime
+
+# ── Make ANSI escape codes work on legacy Windows consoles ────────────────────
+try:
+    import colorama
+    colorama.just_fix_windows_console()
+except Exception:
+    pass
 
 # ── Colour palette ────────────────────────────────────────────────────────────
 _CY  = "\033[96m"
@@ -68,7 +76,9 @@ def _section(title: str):
 def _prompt(msg: str, default: str = "") -> str:
     hint = f" [{default}]" if default else ""
     try:
-        val = input(f"  {_WH}{msg}{hint}{_RS}: ").strip()
+        # .lstrip("﻿") drops a UTF-8 BOM that some shells prepend on the
+        # first piped line, so an empty Enter is still read as empty.
+        val = input(f"  {_WH}{msg}{hint}{_RS}: ").lstrip("﻿").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         sys.exit(0)
@@ -168,6 +178,54 @@ def _audit_log(mode: str, target: str, categories: list[str], result_count: int,
             fh.write(entry)
     except Exception:
         pass   # audit log is non-critical
+
+
+# ── .env loader (no third-party dependency) ───────────────────────────────────
+
+def _load_dotenv(base_dir: str):
+    """
+    Load KEY=VALUE lines from a .env file in the project root into os.environ.
+    Existing environment variables are never overwritten. Silently does nothing
+    if the file is absent or unreadable.
+    """
+    path = os.path.join(base_dir, ".env")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+# ── Target sanity check ──────────────────────────────────────────────────────
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _target_warning(mode: str, target: str) -> str:
+    """
+    Return a human-readable warning if the target looks malformed for the mode,
+    or an empty string if it looks fine. Never blocks — just advises.
+    """
+    t = target.strip()
+    if mode == "email" and not _EMAIL_RE.match(t):
+        return "That doesn't look like an email address (expected name@domain.tld)."
+    if mode == "phone" and len(re.sub(r"\D", "", t)) < 6:
+        return "That doesn't look like a phone number (too few digits)."
+    if mode == "username" and len(t) < 3:
+        return "Usernames under 3 characters produce very noisy, low-signal results."
+    if mode == "person" and " " not in t:
+        return "Name searches work best with a first and last name."
+    return ""
 
 
 # ── Mode selection ─────────────────────────────────────────────────────────────
@@ -320,7 +378,7 @@ def _save_spiderfoot_json(results: list, target: str, path: str) -> str:
     return path
 
 
-def _offer_export(results: list, target: str, reports_dir: str):
+def _offer_export(results: list, target: str, reports_dir: str, analysis=None):
     if not results:
         return
 
@@ -339,32 +397,102 @@ def _offer_export(results: list, target: str, reports_dir: str):
 
     from modules.reporter import save_report, save_json, save_csv, save_markdown
 
-    os.makedirs(reports_dir, exist_ok=True)
+    try:
+        os.makedirs(reports_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"\n  {_RD}[!] Cannot create reports directory ({exc}). Export aborted.{_RS}")
+        return
+
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in target)
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in target) or "target"
 
     for part in [p.strip() for p in raw.split(",") if p.strip()]:
-        if part == "1":
-            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.html")
-            save_report(results, target, output_dir=reports_dir)
-            print(f"  {_GR}✔{_RS} HTML       → {_BL}{path}{_RS}")
-        elif part == "2":
-            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.json")
-            save_json(results, path)
-            print(f"  {_GR}✔{_RS} JSON       → {_BL}{path}{_RS}")
-        elif part == "3":
-            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.csv")
-            save_csv(results, path)
-            print(f"  {_GR}✔{_RS} CSV        → {_BL}{path}{_RS}")
-        elif part == "4":
-            path = os.path.join(reports_dir, f"osint_{safe}_{ts}.md")
-            save_markdown(results, path)
-            print(f"  {_GR}✔{_RS} Markdown   → {_BL}{path}{_RS}")
-        elif part == "5":
-            path = os.path.join(reports_dir, f"osint_{safe}_{ts}_spiderfoot.json")
-            _save_spiderfoot_json(results, target, path)
-            print(f"  {_GR}✔{_RS} SpiderFoot → {_BL}{path}{_RS}")
-            print(f"     {_GY}Load in SpiderFoot: Investigations → Import Data → JSON{_RS}")
+        try:
+            if part == "1":
+                # save_report picks its own timestamped filename — use what it returns
+                path = save_report(results, target, output_dir=reports_dir,
+                                   analysis=analysis)
+                print(f"  {_GR}✔{_RS} HTML       → {_BL}{path}{_RS}")
+            elif part == "2":
+                path = os.path.join(reports_dir, f"osint_{safe}_{ts}.json")
+                save_json(results, path)
+                print(f"  {_GR}✔{_RS} JSON       → {_BL}{path}{_RS}")
+            elif part == "3":
+                path = os.path.join(reports_dir, f"osint_{safe}_{ts}.csv")
+                save_csv(results, path)
+                print(f"  {_GR}✔{_RS} CSV        → {_BL}{path}{_RS}")
+            elif part == "4":
+                path = os.path.join(reports_dir, f"osint_{safe}_{ts}.md")
+                save_markdown(results, path, analysis=analysis)
+                print(f"  {_GR}✔{_RS} Markdown   → {_BL}{path}{_RS}")
+            elif part == "5":
+                path = os.path.join(reports_dir, f"osint_{safe}_{ts}_spiderfoot.json")
+                _save_spiderfoot_json(results, target, path)
+                print(f"  {_GR}✔{_RS} SpiderFoot → {_BL}{path}{_RS}")
+                print(f"     {_GY}Load in SpiderFoot: Investigations → Import Data → JSON{_RS}")
+            else:
+                print(f"  {_YL}Skipped unknown option '{part}'.{_RS}")
+        except Exception as exc:
+            print(f"  {_RD}✘ Export option {part} failed: {exc}{_RS}")
+
+
+# ── AI analysis (RAG pipeline) ───────────────────────────────────────────────
+
+_AI_ENV_KEYS = {
+    "claude": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+}
+
+
+def _run_ai_analysis(results: list, target: str, provider: str):
+    """
+    Run the RAG pipeline over the search results and stream a written
+    intelligence summary to the terminal. Returns the AIAnalysis object on
+    success (for embedding in exports) or None.
+    """
+    if not results:
+        return None
+
+    provider = (provider or "claude").lower()
+    try:
+        from modules.rag.pipeline import run_pipeline
+    except Exception as exc:
+        print(f"\n  {_RD}[!] AI pipeline unavailable: {exc}{_RS}")
+        return None
+
+    api_key = os.environ.get(_AI_ENV_KEYS.get(provider, ""), "")
+    if provider in _AI_ENV_KEYS and not api_key:
+        env = _AI_ENV_KEYS[provider]
+        print(f"\n  {_RD}[!] No API key for '{provider}'. Set {env} as an "
+              f"environment variable or in a .env file, then retry.{_RS}")
+        return None
+
+    _section(f"AI Analysis  ({provider})")
+    print(f"  {_GY}Analysing {len(results)} sources — streaming below…{_RS}\n")
+
+    try:
+        result = run_pipeline(
+            raw_results = results,
+            target      = target,
+            provider    = provider,
+            api_key     = api_key,
+            on_token    = lambda chunk: print(chunk, end="", flush=True),
+        )
+    except Exception as exc:
+        print(f"\n\n  {_RD}[!] AI analysis failed: {exc}{_RS}")
+        return None
+
+    print("\n")
+    analysis = result.analysis
+    if analysis.succeeded:
+        print(f"  {_WH}Risk level:{_RS} {analysis.risk_level}   "
+              f"{_GY}({analysis.source_count} sources analysed, "
+              f"{len(analysis.cited_sources)} cited){_RS}")
+        return analysis
+
+    print(f"  {_RD}[!] {analysis.error or 'AI analysis returned nothing.'}{_RS}")
+    return None
 
 
 # ── History helpers ────────────────────────────────────────────────────────────
@@ -385,7 +513,8 @@ def _save_history(target: str, mode: str, result_count: int, data_dir: str):
 # ── Core search flow ───────────────────────────────────────────────────────────
 
 def _run_search(mode: str, target: str, category_keys: list[str],
-                reports_dir: str, data_dir: str, skip_consent: bool = False):
+                reports_dir: str, data_dir: str, skip_consent: bool = False,
+                run_ai: bool = False, ai_provider: str = "claude"):
     # Consent check for sensitive modes
     if not skip_consent and not _consent_check(mode, target):
         return
@@ -435,8 +564,11 @@ def _run_search(mode: str, target: str, category_keys: list[str],
     # History
     _save_history(target, mode, len(results), data_dir)
 
+    # Optional AI analysis over the results (RAG pipeline)
+    analysis = _run_ai_analysis(results, target, ai_provider) if (run_ai and results) else None
+
     # Export
-    _offer_export(results, target, reports_dir)
+    _offer_export(results, target, reports_dir, analysis=analysis)
 
 
 # ── Interactive loop ───────────────────────────────────────────────────────────
@@ -451,9 +583,23 @@ def _interactive(reports_dir: str, data_dir: str):
             print(f"  {_RD}Target cannot be empty.{_RS}")
             continue
 
+        warning = _target_warning(mode, target)
+        if warning:
+            print(f"  {_YL}⚠  {warning}{_RS}")
+            if _prompt("Search anyway? [y/N]", "n").lower() not in ("y", "yes"):
+                continue
+
         category_keys = _select_categories(mode)
 
-        _run_search(mode, target, category_keys, reports_dir, data_dir)
+        run_ai      = _prompt("Run AI analysis on the results afterwards? [y/N]",
+                              "n").lower() in ("y", "yes")
+        ai_provider = "claude"
+        if run_ai:
+            ai_provider = (_prompt("AI provider (claude/openai/gemini/ollama)",
+                                   "claude").lower().strip() or "claude")
+
+        _run_search(mode, target, category_keys, reports_dir, data_dir,
+                    run_ai=run_ai, ai_provider=ai_provider)
 
         print()
         again = _prompt("Run another search? [y/N]", "n").lower()
@@ -469,6 +615,9 @@ def main():
     reports_dir = os.path.join(base_dir, "reports")
     data_dir    = os.path.join(base_dir, "data")
 
+    # Pick up API keys / config from a gitignored .env file if present
+    _load_dotenv(base_dir)
+
     parser = argparse.ArgumentParser(
         prog        = "osintnews --cli",
         description = "OSINTNEWS CLI — OSINT Identity Search",
@@ -477,8 +626,10 @@ def main():
     parser.add_argument("--mode",   choices=["username", "email", "phone", "person"])
     parser.add_argument("--target", help="Target value to search for")
     parser.add_argument("--all-categories", action="store_true")
-    parser.add_argument("--ai",      action="store_true")
-    parser.add_argument("--provider")
+    parser.add_argument("--ai",      action="store_true",
+                        help="Run AI (RAG) analysis over the results")
+    parser.add_argument("--provider", default="claude",
+                        help="AI provider: claude | openai | gemini | ollama")
     parser.add_argument("--skip-consent", action="store_true",
                         help="Skip consent prompt (use only when you have confirmed consent)")
 
@@ -488,8 +639,12 @@ def main():
         from modules.dorker_osint import categories_for_mode
         keys = list(categories_for_mode(args.mode).keys())
         _banner()
+        warning = _target_warning(args.mode, args.target)
+        if warning:
+            print(f"  {_YL}⚠  {warning}{_RS}\n")
         _run_search(args.mode, args.target, keys, reports_dir, data_dir,
-                    skip_consent=args.skip_consent)
+                    skip_consent=args.skip_consent,
+                    run_ai=args.ai, ai_provider=args.provider)
         return
 
     try:

@@ -88,6 +88,10 @@ _CJK_RANGES = (
     (0xF900, 0xFAFF),   # CJK Compatibility Ideographs
     (0x2E80, 0x2EFF),   # CJK Radicals Supplement
     (0x31C0, 0x31EF),   # CJK Strokes
+    (0x1100, 0x11FF),   # Hangul Jamo (Korean)
+    (0x3130, 0x318F),   # Hangul Compatibility Jamo (Korean)
+    (0xA960, 0xA97F),   # Hangul Jamo Extended-A (Korean)
+    (0xAC00, 0xD7FF),   # Hangul Syllables + Jamo Extended-B (Korean)
 )
 
 # Domains known to produce CJK/irrelevant results for Western OSINT targets

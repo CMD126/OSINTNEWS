@@ -24,11 +24,9 @@ import threading
 # ---------------------------------------------------------------------------
 
 REQUIRED: list[tuple[str, str, str | None, str]] = [
-    ("ddgs",              "ddgs",                  "0.1.0",  "Search engine (new name)"),
+    ("ddgs",              "ddgs",                   "0.1.0",  "Search engine (new name)"),
     ("colorama",          "colorama",               "0.4.6",  "Terminal colours"),
     ("openpyxl",          "openpyxl",               "3.1.0",  "Excel export"),
-    ("anthropic",         "anthropic",              "0.49.0", "Claude AI (optional)"),
-    ("openai",            "openai",                 "1.50.0", "OpenAI AI (optional)"),
     ("requests",          "requests",               "2.32.0", "Ollama + HTTP"),
 ]
 
@@ -39,10 +37,14 @@ MIGRATIONS: list[tuple[str, str, str]] = [
      "renamed to 'ddgs' — removing old package to stop warning spam"),
 ]
 
-# Optional packages — missing is fine, only shown in log
+# Optional packages — missing is fine. Installed only on the first successful
+# setup pass; never retried on every launch. AI providers live here because the
+# tool works fully without them (see requirements.txt).
 OPTIONAL: list[tuple[str, str]] = [
-    ("plyer",              "plyer"),           # Windows notifications
-    ("google.generativeai","google-generativeai"),  # Gemini AI
+    ("plyer",               "plyer"),                 # Windows notifications
+    ("anthropic",           "anthropic"),             # Claude AI
+    ("openai",              "openai"),                # OpenAI AI
+    ("google.generativeai", "google-generativeai"),   # Gemini AI
 ]
 
 
@@ -58,16 +60,28 @@ def _is_installed(import_name: str) -> bool:
         return False
 
 
-def _pip(*args: str, capture: bool = True) -> tuple[int, str]:
-    """Run a pip command. Returns (returncode, combined_output)."""
+def _pip(*args: str, capture: bool = True, timeout: int = 300) -> tuple[int, str]:
+    """Run a pip command. Returns (returncode, combined_output).
+
+    Never raises — a missing pip, offline machine or hung download all resolve
+    to a non-zero return code so the caller can carry on.
+    """
     cmd = [sys.executable, "-m", "pip", *args, "--quiet", "--no-input"]
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    return result.returncode, result.stdout or ""
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode, result.stdout or ""
+    except subprocess.TimeoutExpired:
+        return 1, f"pip timed out after {timeout}s"
+    except FileNotFoundError:
+        return 1, "pip is not available for this interpreter"
+    except Exception as exc:                       # pragma: no cover - defensive
+        return 1, f"pip failed to start: {exc}"
 
 
 def _pkg_needs_install(import_name: str, pip_package: str,
@@ -174,10 +188,12 @@ class _InstallerWindow:
 # Core installer logic
 # ---------------------------------------------------------------------------
 
-def _run_install(ui=None) -> bool:
+def _run_install(ui=None) -> tuple[bool, bool]:
     """
     Check and install all required packages.
-    Returns True if anything was installed (caller may want to restart).
+    Returns (anything_installed, all_required_ok).
+    `all_required_ok` is False if a required package is still missing after the
+    attempt — the caller uses this to decide whether to write the "done" flag.
     """
 
     def status(msg: str):
@@ -195,6 +211,7 @@ def _run_install(ui=None) -> bool:
     total_steps = len(MIGRATIONS) + len(REQUIRED)
     step = 0
     anything_installed = False
+    required_ok = True
 
     # ── Step 1: remove conflicting legacy packages ──
     for import_name, pip_pkg, reason in MIGRATIONS:
@@ -222,24 +239,27 @@ def _run_install(ui=None) -> bool:
             log(f"Installing {pip_pkg} ({notes})")
             install_arg = f"{pip_pkg}>={min_ver}" if min_ver else pip_pkg
             code, out = _pip("install", install_arg)
-            if code == 0:
+            if code == 0 and _is_installed(import_name):
                 log(f"  ✓ {pip_pkg} ready")
                 anything_installed = True
             else:
                 log(f"  ! Failed to install {pip_pkg}: {out[:200]}")
+                required_ok = False
         else:
             log(f"  ✓ {pip_pkg} already OK")
 
-    # ── Step 3: optional packages (best-effort, no failure) ──
+    # ── Step 3: optional packages (best-effort, never blocks startup) ──
     for import_name, pip_pkg in OPTIONAL:
         if not _is_installed(import_name):
             log(f"Installing optional: {pip_pkg}")
-            _pip("install", pip_pkg)
+            code, _ = _pip("install", pip_pkg)
+            if code == 0:
+                anything_installed = True
 
     if ui:
         ui.set_progress(1.0)
 
-    return anything_installed
+    return anything_installed, required_ok
 
 
 # ---------------------------------------------------------------------------
@@ -292,13 +312,23 @@ def ensure_dependencies(force: bool = False) -> None:
         print("[OSINTNEWS setup] Installing dependencies (no GUI available)…",
               flush=True)
 
+    required_ok = True
     try:
-        _run_install(ui)
+        _, required_ok = _run_install(ui)
+    except Exception as exc:                       # pragma: no cover - defensive
+        print(f"[setup] Dependency install error: {exc}", flush=True)
+        required_ok = False
     finally:
         if ui:
             ui.close()
 
-    # Write sentinel so we don't repeat the full check next time
+    # Only write the sentinel when every required package is actually present —
+    # otherwise a transient offline launch would permanently skip setup.
+    if not required_ok:
+        print("[setup] Some required packages are still missing — will retry "
+              "on next launch.", flush=True)
+        return
+
     os.makedirs(os.path.dirname(sentinel), exist_ok=True)
     try:
         with open(sentinel, "w") as fh:

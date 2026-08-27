@@ -9,10 +9,15 @@ Supports four providers:
 
 Upgrades (v2):
   - Ollama now supports streaming via /api/generate with stream=True
-  - Google Gemini provider added (gemini-1.5-flash / gemini-1.5-pro)
+  - Google Gemini provider added
   - max_tokens is a configurable parameter (not hardcoded at 3000)
   - Cleaner error messages with provider name in the model field
   - Type annotations improved throughout
+
+Upgrades (v2.1):
+  - Per-provider default models centralised in DEFAULT_MODELS and refreshed
+    (claude-sonnet-5 / gpt-5 / gemini-2.5-flash / llama3.2)
+  - Non-streaming Claude path handles refusals and non-text leading blocks
 """
 
 from __future__ import annotations
@@ -23,6 +28,18 @@ from typing import Callable
 
 from modules.rag.models import SearchBundle, AIAnalysis
 from modules.rag.prompts import build_prompt_pair
+
+
+# ---------------------------------------------------------------------------
+# Default model per provider — single source of truth.
+# Override at call time by passing an explicit `model=` (GUI Settings / CLI).
+# ---------------------------------------------------------------------------
+DEFAULT_MODELS: dict[str, str] = {
+    "claude": "claude-sonnet-5",       # current Claude 5 family (was claude-sonnet-4-6)
+    "openai": "gpt-5",                 # was gpt-4o
+    "gemini": "gemini-2.5-flash",      # was gemini-1.5-flash
+    "ollama": "llama3.2",              # local default — change to any pulled model
+}
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +117,7 @@ def _make_analysis(target: str, text: str, model: str, items: tuple) -> AIAnalys
 def generate_with_claude(
     bundle:      SearchBundle,
     api_key:     str,
-    model:       str                      = "claude-sonnet-4-6",
+    model:       str                      = "",
     max_tokens:  int                      = 4000,
     on_token:    Callable[[str], None] | None = None,
 ) -> AIAnalysis:
@@ -110,7 +127,7 @@ def generate_with_claude(
     Requires: pip install anthropic
     """
     target   = bundle.target
-    model_id = model or "claude-sonnet-4-6"
+    model_id = model or DEFAULT_MODELS["claude"]
 
     try:
         import anthropic
@@ -136,7 +153,15 @@ def generate_with_claude(
                 system     = system_prompt,
                 messages   = [{"role": "user", "content": user_prompt}],
             )
-            text = response.content[0].text
+            if response.stop_reason == "refusal":
+                return _make_error_analysis(
+                    target, model_id, "Model declined to answer (safety refusal)."
+                )
+            # content may lead with a non-text block — pick the first text block
+            text = next(
+                (b.text for b in response.content if getattr(b, "type", None) == "text"),
+                "",
+            )
 
         return _make_analysis(target, text, model_id, bundle.items)
 
@@ -147,7 +172,7 @@ def generate_with_claude(
 def generate_with_openai(
     bundle:     SearchBundle,
     api_key:    str,
-    model:      str                      = "gpt-4o",
+    model:      str                      = "",
     max_tokens: int                      = 4000,
     on_token:   Callable[[str], None] | None = None,
 ) -> AIAnalysis:
@@ -157,7 +182,7 @@ def generate_with_openai(
     Requires: pip install openai
     """
     target   = bundle.target
-    model_id = model or "gpt-4o"
+    model_id = model or DEFAULT_MODELS["openai"]
 
     try:
         from openai import OpenAI
@@ -201,7 +226,7 @@ def generate_with_openai(
 def generate_with_gemini(
     bundle:     SearchBundle,
     api_key:    str,
-    model:      str                      = "gemini-1.5-flash",
+    model:      str                      = "",
     max_tokens: int                      = 4000,
     on_token:   Callable[[str], None] | None = None,
 ) -> AIAnalysis:
@@ -211,7 +236,7 @@ def generate_with_gemini(
     Requires: pip install google-generativeai
     """
     target   = bundle.target
-    model_id = model or "gemini-1.5-flash"
+    model_id = model or DEFAULT_MODELS["gemini"]
 
     try:
         import google.generativeai as genai
@@ -246,7 +271,7 @@ def generate_with_gemini(
 
 def generate_with_ollama(
     bundle:     SearchBundle,
-    model:      str                      = "llama3.2",
+    model:      str                      = DEFAULT_MODELS["ollama"],
     base_url:   str                      = "http://localhost:11434",
     timeout:    int                      = 180,
     on_token:   Callable[[str], None] | None = None,
@@ -321,7 +346,7 @@ def generate(
     model:        str  = "",
     max_tokens:   int  = 4000,
     ollama_url:   str  = "http://localhost:11434",
-    ollama_model: str  = "llama3.2",
+    ollama_model: str  = "",
     on_token:     Callable[[str], None] | None = None,
 ) -> AIAnalysis:
     """
@@ -343,17 +368,17 @@ def generate(
 
     dispatch = {
         "claude": lambda b: generate_with_claude(
-            b, api_key, model or "claude-sonnet-4-6", max_tokens, on_token
+            b, api_key, model or DEFAULT_MODELS["claude"], max_tokens, on_token
         ),
         "openai": lambda b: generate_with_openai(
-            b, api_key, model or "gpt-4o", max_tokens, on_token
+            b, api_key, model or DEFAULT_MODELS["openai"], max_tokens, on_token
         ),
         "gemini": lambda b: generate_with_gemini(
-            b, api_key, model or "gemini-1.5-flash", max_tokens, on_token
+            b, api_key, model or DEFAULT_MODELS["gemini"], max_tokens, on_token
         ),
         "ollama": lambda b: generate_with_ollama(
             b,
-            model    = ollama_model or "llama3.2",
+            model    = ollama_model or DEFAULT_MODELS["ollama"],
             base_url = ollama_url,
             on_token = on_token,
         ),

@@ -385,10 +385,13 @@ Search Results → Retriever (filter + deduplicate) → LLM Context → AI Repor
 
 | Provider | Env Var | Default Model | Notes |
 |----------|---------|---------------|-------|
-| **Claude** *(recommended)* | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` | Best structured output, streaming |
-| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o` | Streaming supported |
-| **Gemini** | `GOOGLE_API_KEY` | `gemini-1.5-flash` | Fast and cost-effective |
+| **Claude** *(recommended)* | `ANTHROPIC_API_KEY` | `claude-sonnet-5` | Best structured output, streaming |
+| **OpenAI** | `OPENAI_API_KEY` | `gpt-5` | Streaming supported |
+| **Gemini** | `GOOGLE_API_KEY` | `gemini-2.5-flash` | Fast and cost-effective |
 | **Ollama** | *(none)* | `llama3.2` | Free, fully offline, streaming supported |
+
+Override any of these with the **Model** field (GUI Settings) or `--provider`'s
+companion model setting; defaults live in `modules/rag/generator.py` → `DEFAULT_MODELS`.
 
 **Prompt engineering principles:**
 - Anti-hallucination: LLM only uses retrieved sources, never training data

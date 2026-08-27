@@ -5,6 +5,76 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.1.0] — 2026-08-27
+
+### 🐛 Fixed
+- **`modules/searcher.py`** — proxied searches crashed on every query with
+  `ddgs >= 9`. The old `proxies={...}` dict is now sent as `proxy="…"`, so the
+  GUI Proxy field works again.
+- **`modules/searcher.py`** — `ddgs` raises `DDGSException("No results found.")`
+  instead of returning `[]`. This was retried 3× with back-off and logged as an
+  ERROR. It is now recognised as a normal empty result (no retry, no error).
+- **CLI export** — the HTML export printed a filename that did not exist
+  (`save_report` chooses its own timestamped name). It now reports the real path
+  returned by the reporter, and each export format is isolated so one failure
+  no longer aborts the rest.
+- **`modules/dork_common.py`** — phone country-code stripping was greedy:
+  `+441234567890` became `441234567890` → `1234567890` lost a digit, and UK
+  `+44` was misread as `+441`. Now uses a real ITU-T calling-code table with
+  longest-prefix match.
+- **`modules/rag/retriever.py`** — the "CJK" filter never matched Korean
+  Hangul (`0xAC00–0xD7FF` etc. were missing). Korean-script results now filter
+  like Chinese/Japanese ones. *(caught by a new test)*
+- **`modules/rag/generator.py`** — non-streaming Claude path read
+  `response.content[0].text` blindly; it now skips non-text leading blocks and
+  surfaces a `refusal` stop reason as a clean error.
+
+### 🧪 Tests
+- New `pytest` suite (`tests/`, 66 cases, no network): retry/rate-limit/
+  no-results classifiers + parallel orchestration with `ddgs` stubbed
+  (`test_searcher.py`); CJK / relevance / dedup / pipeline filters
+  (`test_retriever.py`); dork builders incl. every phone-format case
+  (`test_dorker.py`); history persistence + `update()` (`test_history.py`).
+  Run with `pytest`.
+
+### 🆕 New
+- **CLI `--ai` / `--provider`** now actually run the RAG pipeline over the
+  results (streamed to the terminal) and embed the analysis in HTML/Markdown
+  exports — previously the flags were parsed and ignored. Interactive mode
+  offers the same via a prompt.
+- **`.env` support** — the CLI loads `KEY=VALUE` pairs from a project-root
+  `.env` on startup (never overrides real env vars). See `.env.example`.
+- **`modules/searcher.py`** — optional `region` (e.g. `pt-pt`) and `backend`
+  selectors; typed `ddgs` exceptions re-exported for callers/tests.
+- **CLI** — target sanity check warns on malformed email / short username /
+  single-word name / too-few-digit phone before burning queries.
+- **CLI** — `colorama.just_fix_windows_console()` so ANSI colours render on
+  legacy Windows terminals.
+
+### ✨ Changed
+- **`modules/installer.py`** — `anthropic` and `openai` moved from *required* to
+  *optional* (the tool is fully usable without any AI provider, matching
+  `requirements.txt`). `pip` calls now have a timeout and never raise. The
+  `data/.deps_ok` sentinel is only written once every **required** package is
+  importable, so a one-off offline launch no longer disables setup forever.
+- **`requirements.txt`** — restructured into Core / Recommended / Optional; `ddgs`
+  documented as the real core package.
+- **`modules/dork_common.py`** (new) — `dorker.py` and `dorker_osint.py` shared
+  three near-identical helpers (`_sanitize`, phone stripping, the
+  `{target}` substitution loop). That logic now lives in one module; the two
+  builders keep only their category tables. Old private names are kept as
+  aliases for compatibility.
+- **`modules/rag/generator.py`** — per-provider default models centralised in a
+  `DEFAULT_MODELS` dict and refreshed: `claude-sonnet-5`, `gpt-5`,
+  `gemini-2.5-flash`, `llama3.2`. Override via the GUI **Model** field or the
+  RAG API's `model=` argument.
+- **`modules/history.py`** / **GUI** — new `HistoryManager.update(entry_id,
+  **fields)`; the GUI no longer reaches into `history.entries[-1]` and calls the
+  private `_save()` to tag the AI risk level, so a second search started while
+  analysis is still running can't overwrite the wrong row.
+
+---
+
 ## [2.0.0] — 2026-04-01
 
 ### 🆕 New — CLI becomes a dedicated OSINT Identity Tool

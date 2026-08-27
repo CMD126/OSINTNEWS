@@ -29,27 +29,27 @@ env.bak/
 venv.bak/
 
 # ── OSINTNEWS runtime files ──────────────────────────────────────────────────
-# Generated reports — these can be large and contain sensitive intel
+# Everything the app writes at runtime is disposable and may contain sensitive
+# intel / personal search targets / API keys. Ignore the whole of data/ and
+# reports/ and keep only the .gitkeep placeholders so a fresh clone still works.
+#   - reports/*.html|.json|.csv|.md   generated reports
+#   - data/settings.json              user settings (API keys)
+#   - data/.deps_ok                   auto-installer sentinel (regenerated)
+#   - data/history.json               GUI search history
+#   - data/osint_history.json         CLI search history
+#   - data/audit.log                  search audit log
 reports/*
 !reports/.gitkeep
 
-# User settings (may contain API keys)
-data/settings.json
-
-# Dependency sentinel — regenerated on first run
-data/.deps_ok
-
-# Search history — contains personal search targets
-# Remove this line if you WANT to track your history in git
-data/history.json
-
-# Keep the empty folder structure so the app works on a fresh clone
+data/*
 !data/.gitkeep
 
 # ── Secrets / credentials (never commit these) ───────────────────────────────
 .env
 .env.*
 *.env
+# the template carries no secrets — keep it tracked
+!.env.example
 secrets.json
 credentials.json
 config.local.*
