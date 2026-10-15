@@ -82,6 +82,21 @@ pip install google-generativeai  # Google Gemini
 # Ollama: install from https://ollama.com — free, fully offline
 ```
 
+### Install as a command (pipx)
+
+```bash
+pipx install "git+https://github.com/CMD126/OSINTNEWS.git"          # core
+pipx install "osintnews[ai] @ git+https://github.com/CMD126/OSINTNEWS.git"   # + AI providers
+osintnews          # GUI
+osintnews-cli      # CLI  (same flags as `osintnews.py --cli`)
+```
+
+Prefer `pipx` over a plain `pip install`: it keeps OSINTNEWS in its own
+virtualenv. When installed this way, settings, history, the audit log and
+reports live in `~/.osintnews/` instead of the install folder. Set
+`OSINTNEWS_HOME` to use a different folder. Running from a git checkout
+(`python osintnews.py`) still uses the repo's `data/` and `reports/`.
+
 ---
 
 ## 🖥️ GUI — News Intelligence
@@ -247,12 +262,74 @@ python osintnews.py --cli --mode phone --target "+351 912 345 678"
 # Person / name search:
 python osintnews.py --cli --mode person --target "John Doe"
 
+# Phase 2 — verify each result with a live HTTP check (see below):
+python osintnews.py --cli --mode username --target johndoe --verify
+
+# Watch a target — report only what's new since the last run (see below):
+python osintnews.py --cli --mode username --target johndoe --watch --interval 3600
+
 # With AI analysis:
 python osintnews.py --cli --mode username --target johndoe --ai --provider claude
 
 # Skip consent prompt (use only when consent is already confirmed):
 python osintnews.py --cli --mode phone --target "+351 912 345 678" --skip-consent
 ```
+
+---
+
+### `--verify` — Phase 2 result verification
+
+The base search is fast but returns *candidates*: DuckDuckGo says a URL mentions
+the target, not that it's really them. `--verify` (or the interactive prompt)
+adds a second pass that fetches each URL and attaches a verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `VERIFIED` | A platform API confirmed the exact handle (GitHub / GitLab / Reddit), or a raw paste literally contains the target |
+| `LIKELY` | The target string is present in the fetched page — not proof of identity |
+| `FALSE_POSITIVE` | The page loaded fine but the target is absent / the API returned 404 |
+| `UNVERIFIABLE` | Login-walled site (Twitter/X, Instagram, TikTok, Facebook, LinkedIn), non-HTTP URL, or the per-run check budget ran out |
+| `ERROR` | Network failure / timeout |
+
+Login-walled platforms are **never requested** — an unauthenticated fetch only
+returns a JS shell whose title still holds the handle, which would look like a
+real hit. The pass is polite by design: ≥ 1 s between hits to the same host, a
+hard request cap, and Ctrl-C stops it cleanly.
+
+When `--verify` ran, the **Exposure level** (LOW / MEDIUM / HIGH / CRITICAL) is
+computed from a documented formula over the *verified* results — platform
+breadth (capped), plus bonuses for paste/leak presence, a public email in the
+evidence, and at least one hard-verified account — and prints its breakdown.
+Verdicts also flow into the HTML report (badge + evidence quote), the CSV
+(`confidence` column) and the SpiderFoot export.
+
+**Cross-correlation.** While verifying, emails / `@handles` / phone numbers
+found in the fetched pages are extracted. Any identifier that shows up on **two
+or more sources** is reported in a *Cross-correlation* section (and the HTML /
+SpiderFoot exports), and each extracted email is re-checked against the
+paste/leak URLs already in the run — chained findings, no extra searches.
+
+---
+
+### `--watch` — monitor a target for new results
+
+```bash
+# One-shot: report only what changed since last time, then exit (for cron):
+python osintnews.py --cli --mode username --target johndoe --watch
+
+# Loop in the terminal, every hour (Ctrl-C to stop):
+python osintnews.py --cli --mode username --target johndoe --watch --interval 3600
+
+# Combine with verification:
+python osintnews.py --cli --mode username --target johndoe --watch --verify
+```
+
+The first run records a baseline of result URLs (keyed by target+mode, target
+stored only as a hash under the git-ignored `data/watch/`). Every later run
+shows only **new** URLs, auto-saves the delta to
+`reports/watch_<hash>_<timestamp>.json`, and fires a desktop notification.
+Watch runs never prompt, so they're safe under cron / Task Scheduler. Intervals
+under 5 minutes are bumped up — DuckDuckGo rate-limits faster polling.
 
 ---
 
@@ -368,6 +445,9 @@ python theHarvester.py -d example.com -b json -f osint_results_spiderfoot.json
 --mode           Search mode: username / email / phone / person
 --target         Search target value
 --all-categories Use all categories for the selected mode (non-interactive)
+--verify         Phase 2: confirm each result with a live HTTP check
+--watch          Report only results new since the last run for this target
+--interval SEC   With --watch, loop every SEC seconds (0 = check once and exit)
 --ai             Run AI analysis on results after search
 --provider       AI provider: claude / openai / gemini / ollama (default: claude)
 --skip-consent   Skip the consent prompt (use only when consent is already confirmed)

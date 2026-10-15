@@ -282,10 +282,8 @@ def ensure_dependencies(force: bool = False) -> None:
     import os
 
     # Use a sentinel file so we skip the check on every launch after first run
-    sentinel = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data", ".deps_ok",
-    )
+    from modules.paths import data_dir
+    sentinel = os.path.join(data_dir(), ".deps_ok")
 
     needs_check = force or not os.path.exists(sentinel)
 

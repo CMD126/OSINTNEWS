@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### 🔒 Security
+- **`modules/reporter.py`** — HTML report links (result cards and AI cited
+  sources) only stay clickable for `http(s)://` URLs. A `javascript:`,
+  `data:` or `vbscript:` URL from a search result used to become a live
+  link in the report. It now gets `href="#"`, and the URL is still shown as
+  text.
+
+### 📦 Packaging
+- **`pyproject.toml`** (new) — `pipx install` / `pip install` with the
+  `osintnews` (GUI) and `osintnews-cli` commands. Extras: `[ai]`, `[notify]`,
+  `[dev]`, `[all]`.
+- **`modules/paths.py`** (new) — decides where state is stored:
+  `$OSINTNEWS_HOME`, then the repo checkout (detected by `data/.gitkeep`),
+  then `~/.osintnews`. Used by the CLI, the GUI and the auto-installer, so an
+  installed copy never writes `settings.json` (API keys) or reports into
+  site-packages.
+
+### 🧪 Tests / CI
+- **`.github/workflows/tests.yml`** (new) — pytest on Ubuntu, Windows and
+  macOS × Python 3.10 / 3.13, installing only the four packages the suite
+  needs.
+- New suites: `test_reporter.py` (escaping, link schemes, every export
+  format), `test_generator.py` (risk parsing, citations, all four providers
+  with faked SDKs), `test_cli.py` (consent gate, hashed audit log, `.env`,
+  SpiderFoot export, export menu, AI key handling, watch loop, search flow,
+  argv routing), `test_paths.py`. 135 → 245 tests, all offline.
+
+---
+
 ## [2.1.0] — 2026-08-27
 
 ### 🐛 Fixed
@@ -30,12 +61,77 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   surfaces a `refusal` stop reason as a clean error.
 
 ### 🧪 Tests
-- New `pytest` suite (`tests/`, 66 cases, no network): retry/rate-limit/
-  no-results classifiers + parallel orchestration with `ddgs` stubbed
+- `pytest` suite (`tests/`, 135 cases, no network): retry/rate-limit/no-results
+  classifiers + parallel orchestration with `ddgs` stubbed
   (`test_searcher.py`); CJK / relevance / dedup / pipeline filters
   (`test_retriever.py`); dork builders incl. every phone-format case
-  (`test_dorker.py`); history persistence + `update()` (`test_history.py`).
-  Run with `pytest`.
+  (`test_dorker.py`); history persistence + `update()` (`test_history.py`);
+  Phase-2 verifier — verdict classification, per-platform routing, throttle,
+  budget (= real requests), queue priority, login-wall handling, `UNVERIFIABLE`
+  breakdown, identifier extraction, cross-correlation, exposure formula
+  (`test_verifier.py`); watch-mode baseline diff / privacy / history cap
+  (`test_watchstore.py`). Run with `pytest`.
+
+### 🆕 New — Phase 2: live result verification (`--verify`)
+- **`modules/verifier.py`** (new) — a second stage that turns the raw DDG URL
+  list into confirmed findings, "Maltego-lite" style:
+  - each result gets a **`confidence`** verdict + **`evidence`**:
+    `VERIFIED` (a platform API confirmed the exact handle, or a raw paste
+    literally contains the target), `LIKELY` (target string is in the fetched
+    page), `FALSE_POSITIVE` (page loaded, target absent / API 404),
+    `UNVERIFIABLE` (login-walled site, non-HTTP, or check budget spent),
+    `ERROR` (network failure).
+  - **API fast-paths** for GitHub / GitLab / Reddit (existence + a short
+    identity line); **raw-paste check** for Pastebin; cheap tag-strip +
+    substring match for everything else. No BeautifulSoup.
+  - **Login-walled platforms (Twitter/X, Instagram, TikTok, Facebook,
+    LinkedIn, Threads, incl. regional subdomains) are never requested** — an
+    unauthenticated GET only returns a JS shell whose title still holds the
+    handle, which would produce false `VERIFIED` hits. Nothing is marked
+    `FALSE_POSITIVE` without actually fetching the page — the URL alone isn't
+    enough signal (an email/phone/name is rarely in the URL at all).
+  - Polite by construction: ≥1 s between hits to the same host, a hard
+    `max_checks` budget, small worker pool, `stop_event` / Ctrl-C support.
+    The budget counts **real HTTP requests only** — login-walled / non-HTTP
+    results are instant and free — and checks run in likely-relevance order
+    (profile APIs and target-in-URL first) so a tight budget lands on the
+    useful URLs. `UNVERIFIABLE` counts print a per-reason / per-host
+    breakdown; a run that verifies nothing suggests a different `--mode`.
+  - **`exposure_level()`** — deterministic, documented score over the
+    *verified* set (platform breadth capped at 8, +paste/leak presence,
+    +public email in evidence, +≥1 hard-verified account) → LOW / MEDIUM /
+    HIGH / CRITICAL with a printed breakdown. Replaces the old
+    raw-result-count heuristic when `--verify` ran.
+- **CLI** — `--verify` flag (and an interactive prompt). Verdicts show in the
+  terminal list, the HTML report (coloured badge + evidence quote), the CSV
+  (`confidence` / `evidence_context` / `evidence_reason` columns) and the
+  SpiderFoot export (`confidence` 0–100 from the verdict; `FALSE_POSITIVE`
+  rows are dropped).
+
+### 🆕 New — Cross-correlation (chained, Maltego-transform style)
+- While verifying, `verifier` extracts emails / `@handles` / phone numbers from
+  each fetched page into `evidence.extracted`.
+- **`verifier.correlate()`** links any identifier that appears on ≥ 2 distinct
+  sources → `{type, value, found_on, sources, confidence}` (2 sources MEDIUM,
+  3+ HIGH). **`verifier.build_email_recheck_targets()`** feeds a chained pass —
+  every extracted email re-checked against the paste/leak URLs already in the
+  run, reusing the verifier (no new dork searches).
+- The CLI prints a **Cross-correlation** section (linked identifiers + any
+  extracted email that turns up on a paste/leak site) whenever `--verify` ran;
+  correlations also flow into the HTML report (a table) and the SpiderFoot
+  export (`AFFILIATE_EMAILADDR` / `USERNAME` / `PHONE_NUMBER` events).
+
+### 🆕 New — Watch mode (`--watch`)
+- **`modules/watchstore.py`** (new) — per-`(target, mode)` baseline of seen
+  result URLs (target stored only as a SHA-256 prefix; files under the
+  git-ignored `data/watch/`). Keeps the last 50 run records.
+- **CLI** — `--watch` reports only results **new since the last run**;
+  `--interval SECONDS` loops (Ctrl-C stops), and with no interval it does a
+  single diff-and-exit for cron / Task Scheduler. Sub-5-minute intervals are
+  bumped up (DuckDuckGo rate-limits faster polling). Watch runs never prompt:
+  each cycle auto-saves its results to `reports/watch_<hash>_<ts>.json` and a
+  delta run fires a desktop notification. Also available via interactive
+  prompts.
 
 ### 🆕 New
 - **CLI `--ai` / `--provider`** now actually run the RAG pipeline over the

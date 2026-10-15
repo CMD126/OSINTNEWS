@@ -273,6 +273,132 @@ def _on_progress(done: int, total: int):
           end="", flush=True)
 
 
+# ── Phase 2 — live verification ───────────────────────────────────────────────
+
+_CONF_STYLE = {
+    "VERIFIED":       ("✔", "\033[92m"),   # green
+    "LIKELY":         ("~", "\033[96m"),   # cyan
+    "UNVERIFIABLE":   ("?", "\033[90m"),   # grey
+    "FALSE_POSITIVE": ("✘", "\033[93m"),   # yellow
+    "ERROR":          ("!", "\033[91m"),   # red
+}
+
+
+def _verify_results(results: list, mode: str) -> list:
+    """Run the verifier over the raw results and print a verdict breakdown."""
+    from modules import verifier
+
+    _section("Verifying results  (live HTTP checks)")
+    print(f"  {_GY}Checking {len(results)} URL(s). Login-walled sites "
+          f"(Twitter/X, Instagram, LinkedIn, …) are not requested.{_RS}\n")
+
+    stop_event = threading.Event()
+    try:
+        results = verifier.verify_results(
+            results,
+            on_status   = _on_status,
+            on_progress = _on_progress,
+            stop_event  = stop_event,
+        )
+    except KeyboardInterrupt:
+        stop_event.set()
+        print(f"\n\n  {_YL}[!] Verification cancelled — showing what completed.{_RS}")
+
+    print("\n")
+    counts = verifier.summarize(results)
+    for level in verifier.CONFIDENCE_ORDER:
+        mark, colour = _CONF_STYLE[level]
+        print(f"  {colour}{mark} {level:<15}{_RS} {counts.get(level, 0)}")
+        if level == "UNVERIFIABLE" and counts.get(level):
+            for label, n, hosts in verifier.unverifiable_breakdown(results):
+                detail = ", ".join(f"{h}×{c}" for h, c in hosts)
+                print(f"      {_GY}↳ {n} {label}"
+                      f"{('  (' + detail + ')') if detail else ''}{_RS}")
+
+    if not counts.get("VERIFIED") and not counts.get("LIKELY"):
+        alt = {"username": "email / person", "email": "username / person",
+               "phone": "person", "person": "username"}.get(mode, "another mode")
+        print(f"\n  {_YL}Nothing could be verified.{_RS} {_GY}Login-walled platforms "
+              f"can't be checked without an account — try {_WH}--mode {alt}{_RS}{_GY}, "
+              f"or a target with a GitHub / Reddit / paste presence.{_RS}")
+    return results
+
+
+def _exposure_line(results: list):
+    """One-line exposure verdict using the documented verifier formula."""
+    from modules import verifier
+
+    level, points, breakdown = verifier.exposure_level(results)
+    colour = {"LOW": _GR, "MEDIUM": _YL, "HIGH": _MG, "CRITICAL": _RD}.get(level, _GY)
+    print(f"\n  {_WH}Exposure level:{_RS} {colour}{_BO}{level}{_RS}  "
+          f"{_GY}({points} pts){_RS}")
+    for line in breakdown:
+        print(f"    {_GY}· {line}{_RS}")
+
+
+# ── Cross-correlation (chained, Maltego-transform style) ──────────────────────
+
+def _cross_correlation(results: list) -> tuple:
+    """
+    Link identifiers that surfaced during verification and run one chained pass:
+    extracted emails re-checked against the paste/leak URLs already in the run
+    (no new dork searches). Returns (correlations, chained_findings).
+    """
+    from modules import verifier
+
+    correlations = verifier.correlate(results)
+    recheck = verifier.build_email_recheck_targets(results)
+    chained: list = []
+
+    if recheck:
+        n_emails = len({t["target"] for t in recheck})
+        n_urls   = len({t["href"] for t in recheck})
+        _section("Cross-correlation")
+        print(f"  {_GY}Re-checking {n_emails} extracted email(s) against "
+              f"{n_urls} paste/leak URL(s)…{_RS}\n")
+        stop_event = threading.Event()
+        try:
+            rechecked = verifier.verify_results(
+                recheck, on_status=_on_status, on_progress=_on_progress,
+                stop_event=stop_event, max_checks=40,
+            )
+        except KeyboardInterrupt:
+            stop_event.set()
+            rechecked = []
+            print(f"\n  {_YL}[!] Cross-check cancelled.{_RS}")
+        print("\n")
+        for r in rechecked:
+            if r.get("confidence") in ("VERIFIED", "LIKELY"):
+                chained.append({
+                    "email":      r.get("target", ""),
+                    "url":        r.get("href", ""),
+                    "confidence": r["confidence"],
+                    "context":    (r.get("evidence") or {}).get("context", ""),
+                })
+    elif any(r.get("confidence") for r in results):
+        _section("Cross-correlation")
+
+    if not correlations and not chained:
+        if any(r.get("confidence") for r in results):
+            print(f"  {_GY}No identifier appeared on two or more sources.{_RS}")
+        return correlations, chained
+
+    if correlations:
+        print(f"  {_GR}● Identifiers linked across platforms:{_RS}")
+        for c in correlations:
+            col = _MG if c["confidence"] == "HIGH" else _YL
+            print(f"    {col}{c['type'].upper():<7}{_RS} {_WH}{c['value']}{_RS}  "
+                  f"{_GY}— {len(c['found_on'])} sources: {', '.join(c['found_on'])}{_RS}")
+    if chained:
+        print(f"\n  {_RD}● Extracted emails also found on paste/leak sites:{_RS}")
+        for f in chained:
+            print(f"    {_WH}{f['email']}{_RS}  {_BL}{f['url']}{_RS}")
+            if f["context"]:
+                print(f"      {_GY}{f['context'][:160]}{_RS}")
+
+    return correlations, chained
+
+
 # ── Username correlation ───────────────────────────────────────────────────────
 
 def _username_correlation(results: list, target: str):
@@ -302,32 +428,48 @@ def _username_correlation(results: list, target: str):
         else:
             empty.append(name)
 
+    verified_run = any(r.get("confidence") for r in results)
+
     if confirmed:
         print(f"  {_GR}● Presence detected on:{_RS}")
         for name, items in confirmed:
-            urls = [r.get("href", "") for r in items if r.get("href")]
-            print(f"    {_WH}{name}{_RS}  ({len(items)} result{'s' if len(items) != 1 else ''})")
-            for url in urls[:2]:
-                print(f"      {_BL}{url}{_RS}")
+            if verified_run:
+                v = sum(1 for r in items if r.get("confidence") == "VERIFIED")
+                lk = sum(1 for r in items if r.get("confidence") == "LIKELY")
+                tag = (f"  {_GR}{v} verified{_RS}, {_CY}{lk} likely{_RS}"
+                       if (v or lk) else f"  {_GY}none confirmed{_RS}")
+            else:
+                tag = ""
+            print(f"    {_WH}{name}{_RS}  ({len(items)} result"
+                  f"{'s' if len(items) != 1 else ''}){tag}")
+            # when verified, lead with the strongest hits
+            show = sorted(items, key=lambda r: (
+                {"VERIFIED": 0, "LIKELY": 1}.get(r.get("confidence"), 2)))
+            for r in show[:2]:
+                if r.get("href"):
+                    print(f"      {_BL}{r['href']}{_RS}")
     else:
         print(f"  {_GY}● No confirmed presence found on any searched platform.{_RS}")
 
     if empty:
         print(f"\n  {_GY}○ No results on:{_RS} {', '.join(empty)}")
 
-    # Risk assessment
-    count = len(confirmed)
-    if count == 0:
-        level, colour = "LOW",      _GR
-    elif count <= 3:
-        level, colour = "MEDIUM",   _YL
-    elif count <= 6:
-        level, colour = "HIGH",     _MG
+    # Risk assessment — prefer the verified exposure formula when Phase 2 ran
+    if any(r.get("confidence") for r in results):
+        _exposure_line(results)
+        count = sum(1 for r in results if r.get("confidence") in ("VERIFIED", "LIKELY"))
     else:
-        level, colour = "CRITICAL", _RD
-
-    print(f"\n  {_WH}Exposure level:{_RS} {colour}{_BO}{level}{_RS}  "
-          f"{_GY}({count} platform{'s' if count != 1 else ''} with results){_RS}")
+        count = len(confirmed)
+        if count == 0:
+            level, colour = "LOW",      _GR
+        elif count <= 3:
+            level, colour = "MEDIUM",   _YL
+        elif count <= 6:
+            level, colour = "HIGH",     _MG
+        else:
+            level, colour = "CRITICAL", _RD
+        print(f"\n  {_WH}Exposure level:{_RS} {colour}{_BO}{level}{_RS}  "
+              f"{_GY}({count} platform{'s' if count != 1 else ''} with results){_RS}")
 
     if count >= 4:
         print(f"\n  {_YL}⚠  Consider reviewing and limiting your public footprint.{_RS}")
@@ -336,11 +478,19 @@ def _username_correlation(results: list, target: str):
 
 # ── Export helpers ─────────────────────────────────────────────────────────────
 
-def _save_spiderfoot_json(results: list, target: str, path: str) -> str:
+def _save_spiderfoot_json(results: list, target: str, path: str,
+                          correlations: list | None = None) -> str:
     """
     Export results in SpiderFoot-compatible JSON format.
     SpiderFoot expects a list of events with type, data, source, confidence.
     """
+    # Verification verdict → SpiderFoot confidence (0-100). Default 75 when the
+    # result was never verified (--verify not used).
+    sf_conf_map = {
+        "VERIFIED": 100, "LIKELY": 75, "UNVERIFIABLE": 50,
+        "FALSE_POSITIVE": 15, "ERROR": 40,
+    }
+
     events = []
     for r in results:
         url     = r.get("href",     "")
@@ -348,6 +498,11 @@ def _save_spiderfoot_json(results: list, target: str, path: str) -> str:
         body    = r.get("body",     "") or ""
         cat     = r.get("category", "OSINT")
         mode    = r.get("mode",     "username")
+        conf    = r.get("confidence")
+
+        # Skip results the live check actively disproved
+        if conf == "FALSE_POSITIVE":
+            continue
 
         # Map OSINTNEWS mode to SpiderFoot event types
         sf_type_map = {
@@ -358,19 +513,40 @@ def _save_spiderfoot_json(results: list, target: str, path: str) -> str:
         }
         sf_type = sf_type_map.get(mode, "LINKED_URL_INTERNAL")
 
+        evidence = r.get("evidence") or {}
         events.append({
             "type":       sf_type,
             "data":       url or title,
             "source":     "OSINTNEWS-CLI",
             "module":     f"osintnews_{cat.lower().replace(' ', '_')}",
-            "confidence": 75,
+            "confidence": sf_conf_map.get(conf, 75),
+            "verified":   conf or "NOT_CHECKED",
             "visibility": 1,
             "risk":       "INFO",
             "generated":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "target":     target,
             "title":      title,
-            "snippet":    body[:300],
+            "snippet":    (evidence.get("context") or body)[:300],
             "url":        url,
+        })
+
+    # Cross-correlation records → SpiderFoot affiliate/associated events
+    sf_corr_type = {"email": "AFFILIATE_EMAILADDR",
+                    "handle": "USERNAME", "phone": "PHONE_NUMBER"}
+    for c in (correlations or []):
+        events.append({
+            "type":       sf_corr_type.get(c["type"], "RAW_RIR_DATA"),
+            "data":       c["value"],
+            "source":     "OSINTNEWS-CLI/correlation",
+            "module":     "osintnews_correlation",
+            "confidence": 90 if c["confidence"] == "HIGH" else 70,
+            "visibility": 2,
+            "risk":       "INFO",
+            "generated":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "target":     target,
+            "title":      f"{c['value']} — linked across {len(c['found_on'])} sources",
+            "snippet":    "found on: " + ", ".join(c["found_on"]),
+            "url":        (c["sources"][0] if c["sources"] else ""),
         })
 
     with open(path, "w", encoding="utf-8") as fh:
@@ -378,7 +554,30 @@ def _save_spiderfoot_json(results: list, target: str, path: str) -> str:
     return path
 
 
-def _offer_export(results: list, target: str, reports_dir: str, analysis=None):
+def _autosave_watch(results: list, target: str, mode: str, reports_dir: str,
+                    correlations: list, chained: list):
+    """Silently persist a watch cycle's new hits to reports/watch_<hash>_<ts>.json."""
+    try:
+        import hashlib
+        os.makedirs(reports_dir, exist_ok=True)
+        h  = hashlib.sha256(f"{mode}:{target}".encode()).hexdigest()[:12]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(reports_dir, f"watch_{h}_{ts}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "target": target, "mode": mode,
+                "captured": datetime.now().isoformat(timespec="seconds"),
+                "new_results": results,
+                "correlations": correlations,
+                "chained_findings": chained,
+            }, fh, indent=2, ensure_ascii=False)
+        print(f"  {_GR}✔{_RS} new hits saved → {_BL}{path}{_RS}")
+    except Exception as exc:
+        print(f"  {_YL}(could not auto-save watch delta: {exc}){_RS}")
+
+
+def _offer_export(results: list, target: str, reports_dir: str, analysis=None,
+                  correlations: list | None = None):
     if not results:
         return
 
@@ -411,7 +610,7 @@ def _offer_export(results: list, target: str, reports_dir: str, analysis=None):
             if part == "1":
                 # save_report picks its own timestamped filename — use what it returns
                 path = save_report(results, target, output_dir=reports_dir,
-                                   analysis=analysis)
+                                   analysis=analysis, correlations=correlations)
                 print(f"  {_GR}✔{_RS} HTML       → {_BL}{path}{_RS}")
             elif part == "2":
                 path = os.path.join(reports_dir, f"osint_{safe}_{ts}.json")
@@ -427,7 +626,7 @@ def _offer_export(results: list, target: str, reports_dir: str, analysis=None):
                 print(f"  {_GR}✔{_RS} Markdown   → {_BL}{path}{_RS}")
             elif part == "5":
                 path = os.path.join(reports_dir, f"osint_{safe}_{ts}_spiderfoot.json")
-                _save_spiderfoot_json(results, target, path)
+                _save_spiderfoot_json(results, target, path, correlations=correlations)
                 print(f"  {_GR}✔{_RS} SpiderFoot → {_BL}{path}{_RS}")
                 print(f"     {_GY}Load in SpiderFoot: Investigations → Import Data → JSON{_RS}")
             else:
@@ -514,7 +713,8 @@ def _save_history(target: str, mode: str, result_count: int, data_dir: str):
 
 def _run_search(mode: str, target: str, category_keys: list[str],
                 reports_dir: str, data_dir: str, skip_consent: bool = False,
-                run_ai: bool = False, ai_provider: str = "claude"):
+                run_ai: bool = False, ai_provider: str = "claude",
+                verify: bool = False, watch: bool = False):
     # Consent check for sensitive modes
     if not skip_consent and not _consent_check(mode, target):
         return
@@ -551,24 +751,103 @@ def _run_search(mode: str, target: str, category_keys: list[str],
 
     print("\n")
 
+    # Always audit-log the full run (target stored as a hash)
+    _audit_log(mode, target, category_keys, len(results), data_dir)
+
+    # ── Watch mode — diff against the stored baseline, act on new only ──
+    watch_is_delta = False   # True once we're past the first (baseline) run
+    if watch:
+        from modules import watchstore
+        diff = watchstore.diff_and_update(data_dir, target, mode, results,
+                                          categories=category_keys)
+        if diff["first_run"]:
+            print(f"  {_CY}Watch baseline established — {len(results)} result(s) "
+                  f"recorded. Future runs show only what's new.{_RS}\n")
+        else:
+            watch_is_delta = True
+            since = diff["last_run"] or "last run"
+            if not diff["new"]:
+                print(f"  {_GR}✓ Nothing new since {since}.{_RS}  "
+                      f"{_GY}({diff['known']} known result(s)){_RS}")
+                _save_history(target, mode, len(results), data_dir)
+                return
+            print(f"  {_YL}▲ {len(diff['new'])} NEW result(s) since {since}{_RS}  "
+                  f"{_GY}({diff['known']} already seen){_RS}\n")
+            results = diff["new"]                     # act on the delta only
+
+    # Phase 2 — live HTTP verification of each candidate URL
+    if verify and results:
+        results = _verify_results(results, mode)
+
     # Standard result display
     print_results(results, target)
 
     # Username correlation summary (only for username mode)
     if mode == "username" and results:
         _username_correlation(results, target)
+    elif verify and results:
+        _exposure_line(results)
 
-    # Audit log (target stored as hash, not plaintext)
-    _audit_log(mode, target, category_keys, len(results), data_dir)
+    # Cross-correlation + chained email re-check (only meaningful after --verify)
+    correlations, chained = ([], [])
+    if verify and results:
+        correlations, chained = _cross_correlation(results)
 
     # History
     _save_history(target, mode, len(results), data_dir)
+
+    # Watch mode never prompts (it may run in a loop / from cron): auto-save the
+    # run's results and, on a delta run, fire a desktop notification.
+    if watch:
+        if watch_is_delta:
+            try:
+                from modules.notifier import notify
+                notify("OSINTNEWS — new results",
+                       f"{len(results)} new hit(s) for {target}")
+            except Exception:
+                pass
+        _autosave_watch(results, target, mode, reports_dir, correlations, chained)
+        return
 
     # Optional AI analysis over the results (RAG pipeline)
     analysis = _run_ai_analysis(results, target, ai_provider) if (run_ai and results) else None
 
     # Export
-    _offer_export(results, target, reports_dir, analysis=analysis)
+    _offer_export(results, target, reports_dir, analysis=analysis,
+                  correlations=correlations)
+
+
+# ── Watch mode ────────────────────────────────────────────────────────────────
+
+_MIN_WATCH_INTERVAL = 300   # 5 min — below this DuckDuckGo just rate-limits you
+
+
+def _watch_loop(run_once, interval: int):
+    """
+    Repeatedly call `run_once` every `interval` seconds until Ctrl-C.
+    `interval <= 0` runs it exactly once (cron / Task Scheduler style).
+    """
+    from datetime import datetime as _dt
+    cycle = 0
+    while True:
+        cycle += 1
+        print(f"\n{_MG}{'═' * 62}{_RS}")
+        print(f"{_MG}  watch cycle {cycle}  ·  {_dt.now():%Y-%m-%d %H:%M:%S}{_RS}")
+        print(f"{_MG}{'═' * 62}{_RS}")
+        try:
+            run_once()
+        except KeyboardInterrupt:
+            print(f"\n  {_CY}Watch stopped.{_RS}\n")
+            return
+        if interval <= 0:
+            return
+        print(f"\n  {_GY}Sleeping {interval}s … (Ctrl-C to stop){_RS}")
+        try:
+            import time as _t
+            _t.sleep(interval)
+        except KeyboardInterrupt:
+            print(f"\n  {_CY}Watch stopped.{_RS}\n")
+            return
 
 
 # ── Interactive loop ───────────────────────────────────────────────────────────
@@ -591,15 +870,41 @@ def _interactive(reports_dir: str, data_dir: str):
 
         category_keys = _select_categories(mode)
 
-        run_ai      = _prompt("Run AI analysis on the results afterwards? [y/N]",
-                              "n").lower() in ("y", "yes")
-        ai_provider = "claude"
-        if run_ai:
-            ai_provider = (_prompt("AI provider (claude/openai/gemini/ollama)",
-                                   "claude").lower().strip() or "claude")
+        verify = _prompt("Verify each result with a live HTTP check afterwards "
+                         "(slower)? [y/N]", "n").lower() in ("y", "yes")
 
-        _run_search(mode, target, category_keys, reports_dir, data_dir,
-                    run_ai=run_ai, ai_provider=ai_provider)
+        watch = _prompt("Watch this target for NEW results on a schedule? [y/N]",
+                        "n").lower() in ("y", "yes")
+        interval = 0
+        if watch:
+            raw = _prompt("Interval in seconds (0 = check once now)", "3600")
+            try:
+                interval = max(0, int(raw))
+            except ValueError:
+                interval = 3600
+            if 0 < interval < _MIN_WATCH_INTERVAL:
+                print(f"  {_YL}Bumping interval to {_MIN_WATCH_INTERVAL}s "
+                      f"(DuckDuckGo rate-limits anything faster).{_RS}")
+                interval = _MIN_WATCH_INTERVAL
+
+        run_ai      = False
+        ai_provider = "claude"
+        if not watch:
+            run_ai = _prompt("Run AI analysis on the results afterwards? [y/N]",
+                             "n").lower() in ("y", "yes")
+            if run_ai:
+                ai_provider = (_prompt("AI provider (claude/openai/gemini/ollama)",
+                                       "claude").lower().strip() or "claude")
+
+        def _once():
+            _run_search(mode, target, category_keys, reports_dir, data_dir,
+                        run_ai=run_ai, ai_provider=ai_provider, verify=verify,
+                        watch=watch)
+
+        if watch:
+            _watch_loop(_once, interval)
+        else:
+            _once()
 
         print()
         again = _prompt("Run another search? [y/N]", "n").lower()
@@ -611,7 +916,8 @@ def _interactive(reports_dir: str, data_dir: str):
 # ── Argument-driven entry point ────────────────────────────────────────────────
 
 def main():
-    base_dir    = os.path.dirname(os.path.abspath(__file__))
+    from modules.paths import app_home
+    base_dir    = app_home()
     reports_dir = os.path.join(base_dir, "reports")
     data_dir    = os.path.join(base_dir, "data")
 
@@ -626,6 +932,12 @@ def main():
     parser.add_argument("--mode",   choices=["username", "email", "phone", "person"])
     parser.add_argument("--target", help="Target value to search for")
     parser.add_argument("--all-categories", action="store_true")
+    parser.add_argument("--verify", action="store_true",
+                        help="Phase 2: confirm each result with a live HTTP check")
+    parser.add_argument("--watch", action="store_true",
+                        help="Watch mode: report only results new since the last run")
+    parser.add_argument("--interval", type=int, default=0, metavar="SECONDS",
+                        help="With --watch, loop every SECONDS (0 = check once and exit)")
     parser.add_argument("--ai",      action="store_true",
                         help="Run AI (RAG) analysis over the results")
     parser.add_argument("--provider", default="claude",
@@ -642,9 +954,24 @@ def main():
         warning = _target_warning(args.mode, args.target)
         if warning:
             print(f"  {_YL}⚠  {warning}{_RS}\n")
-        _run_search(args.mode, args.target, keys, reports_dir, data_dir,
-                    skip_consent=args.skip_consent,
-                    run_ai=args.ai, ai_provider=args.provider)
+
+        interval = args.interval
+        if args.watch and 0 < interval < _MIN_WATCH_INTERVAL:
+            print(f"  {_YL}⚠  --interval bumped to {_MIN_WATCH_INTERVAL}s "
+                  f"(DuckDuckGo rate-limits anything faster).{_RS}\n")
+            interval = _MIN_WATCH_INTERVAL
+
+        def _once():
+            _run_search(args.mode, args.target, keys, reports_dir, data_dir,
+                        skip_consent=args.skip_consent,
+                        run_ai=args.ai and not args.watch,
+                        ai_provider=args.provider,
+                        verify=args.verify, watch=args.watch)
+
+        if args.watch:
+            _watch_loop(_once, interval)
+        else:
+            _once()
         return
 
     try:

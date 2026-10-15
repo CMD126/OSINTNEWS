@@ -36,6 +36,15 @@ def print_results(results: list, target: str) -> None:
     print(f"{_CYAN}  Results for: {_WHITE}{target}{_CYAN}  |  Total: {_WHITE}{len(results)}{_RESET}")
     print(f"{_GREEN}{'=' * 70}{_RESET}")
 
+    # colour + glyph per verification verdict (present only when --verify ran)
+    _conf_style = {
+        "VERIFIED":       (_GREEN,  "✔"),
+        "LIKELY":         (_CYAN,   "~"),
+        "UNVERIFIABLE":   (_GREY,   "?"),
+        "FALSE_POSITIVE": (_YELLOW, "✘"),
+        "ERROR":          (_RED,    "!"),
+    }
+
     current_cat = None
     idx = 1
     for r in results:
@@ -50,10 +59,22 @@ def print_results(results: list, target: str) -> None:
         body    = r.get("body",  "") or ""
         snippet = (body[:150] + "...") if len(body) > 150 else body
 
-        print(f"\n  {_WHITE}{idx}. {title}{_RESET}")
+        conf = r.get("confidence")
+        tag  = ""
+        if conf in _conf_style:
+            c, glyph = _conf_style[conf]
+            tag = f"{c}{glyph} {conf}{_RESET}  "
+
+        print(f"\n  {_WHITE}{idx}. {tag}{_WHITE}{title}{_RESET}")
         print(f"     {_BLUE}{url}{_RESET}")
         if snippet:
             print(f"     {_GREY}{snippet}{_RESET}")
+
+        evidence = r.get("evidence") or {}
+        if evidence.get("context"):
+            print(f"     {_GREEN}↳ evidence:{_RESET} {_GREY}{evidence['context'][:180]}{_RESET}")
+        elif conf in ("FALSE_POSITIVE", "UNVERIFIABLE", "ERROR") and evidence.get("reason"):
+            print(f"     {_GREY}↳ {evidence['reason']}{_RESET}")
         idx += 1
 
 
@@ -66,13 +87,14 @@ def save_report(
     target:     str,
     output_dir: str = "reports",
     analysis=None,          # Optional[AIAnalysis]
+    correlations=None,      # Optional[list] from verifier.correlate()
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe      = "".join(c if c.isalnum() or c in "-_" else "_" for c in target)
     path      = os.path.join(output_dir, f"osintnews_{safe}_{timestamp}.html")
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(_build_html(results, target, timestamp, analysis))
+        fh.write(_build_html(results, target, timestamp, analysis, correlations))
     return path
 
 
@@ -81,13 +103,14 @@ def save_report_to(
     target:   str,
     path:     str,
     analysis=None,          # Optional[AIAnalysis]
+    correlations=None,
 ) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(_build_html(results, target, timestamp, analysis))
+        fh.write(_build_html(results, target, timestamp, analysis, correlations))
     return path
 
 
@@ -96,11 +119,18 @@ def save_report_to(
 # ---------------------------------------------------------------------------
 
 def save_csv(results: list, path: str) -> str:
-    fields = ["target", "category", "title", "href", "body", "query"]
+    fields = ["target", "category", "title", "href", "body", "query",
+              "confidence", "evidence_context", "evidence_reason"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(results)
+        for r in results:
+            ev = r.get("evidence") or {}
+            writer.writerow({
+                **r,
+                "evidence_context": ev.get("context", ""),
+                "evidence_reason":  ev.get("reason", ""),
+            })
     return path
 
 
@@ -278,11 +308,46 @@ def _md_to_html(text: str) -> str:
 # HTML builder
 # ---------------------------------------------------------------------------
 
-def _build_html(results: list, target: str, timestamp: str, analysis=None) -> str:
+def _safe_href(url: str) -> str:
+    """Escaped href for an untrusted URL; anything but http(s) becomes '#'.
+
+    Browsers drop ASCII whitespace/control chars inside a scheme, so
+    "java\\tscript:" still runs — hence an allow-list, not a block-list.
+    """
+    cleaned = re.sub(r"[\x00-\x20]", "", url or "")
+    if not re.match(r"https?://", cleaned, re.IGNORECASE):
+        return "#"
+    return html_lib.escape(url.strip())
+
+
+def _build_html(results: list, target: str, timestamp: str, analysis=None,
+                correlations=None) -> str:
     cats: dict = {}
     for r in results:
         cat = r.get("category", "Uncategorized")
         cats.setdefault(cat, []).append(r)
+
+    # --- Cross-correlation block ---
+    corr_block = ""
+    if correlations:
+        rows = "".join(
+            f"<tr><td class='corr-type'>{html_lib.escape(c['type'])}</td>"
+            f"<td class='corr-val'>{html_lib.escape(str(c['value']))}</td>"
+            f"<td>{html_lib.escape(', '.join(c['found_on']))}</td>"
+            f"<td class='corr-conf corr-{html_lib.escape(str(c['confidence']).lower())}'>"
+            f"{html_lib.escape(str(c['confidence']))}</td></tr>"
+            for c in correlations
+        )
+        corr_block = f"""
+        <section class="corr-section">
+            <h2 class="cat-title">&#128279; Cross-correlation
+                <span class="badge">{len(correlations)}</span></h2>
+            <table class="corr-table">
+              <tr><th>Type</th><th>Value</th><th>Found on</th><th>Confidence</th></tr>
+              {rows}
+            </table>
+        </section>
+        """
 
     # --- AI analysis block ---
     ai_block = ""
@@ -290,7 +355,7 @@ def _build_html(results: list, target: str, timestamp: str, analysis=None) -> st
         risk_color = analysis.risk_color_hex
         ai_html    = _md_to_html(analysis.summary)
         cited_list = "".join(
-            f'<li><a href="{html_lib.escape(u)}" target="_blank" rel="noopener">{html_lib.escape(u)}</a></li>'
+            f'<li><a href="{_safe_href(u)}" target="_blank" rel="noopener">{html_lib.escape(u)}</a></li>'
             for u in analysis.cited_sources
         )
         ai_block = f"""
@@ -330,16 +395,31 @@ def _build_html(results: list, target: str, timestamp: str, analysis=None) -> st
         """
         for item in items:
             t   = html_lib.escape(item.get("title",  "No title"))
-            url = html_lib.escape(item.get("href",   "#"))
+            raw_url = item.get("href", "") or ""
+            url  = html_lib.escape(raw_url or "#")
+            href = _safe_href(raw_url)
             b   = html_lib.escape((item.get("body",  "") or "")[:300])
             q   = html_lib.escape(item.get("query",  ""))
             tgt = html_lib.escape(item.get("target", ""))
+
+            conf = item.get("confidence")
+            conf_badge = ""
+            evid_html  = ""
+            if conf:
+                conf_badge = (f'<span class="conf conf-{html_lib.escape(str(conf).lower())}">'
+                              f'{html_lib.escape(str(conf))}</span>')
+                ev = item.get("evidence") or {}
+                detail = ev.get("context") or ev.get("reason") or ""
+                if detail:
+                    evid_html = f'<div class="card-evidence">{html_lib.escape(detail[:400])}</div>'
+
             cards += f"""
                 <article class="card">
-                    <a class="card-title" href="{url}" target="_blank" rel="noopener">{t}</a>
-                    <div class="card-meta"><span class="card-target">&#128269; {tgt}</span></div>
+                    <a class="card-title" href="{href}" target="_blank" rel="noopener">{t}</a>
+                    <div class="card-meta">{conf_badge}<span class="card-target">&#128269; {tgt}</span></div>
                     <div class="card-url">{url}</div>
                     <div class="card-body">{b}</div>
+                    {evid_html}
                     <span class="card-query">{q}</span>
                 </article>
             """
@@ -398,11 +478,29 @@ h1{{font-size:1.9rem;color:#58a6ff}}
 .card:hover{{border-color:#58a6ff}}
 .card-title{{display:block;color:#58a6ff;font-size:.97rem;font-weight:600;text-decoration:none;margin-bottom:5px}}
 .card-title:hover{{color:#79c0ff;text-decoration:underline}}
-.card-meta{{font-size:.72rem;color:#8b949e;margin-bottom:4px}}
+.card-meta{{font-size:.72rem;color:#8b949e;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
 .card-target{{color:#d29922}}
 .card-url{{color:#3fb950;font-size:.72rem;margin-bottom:8px;word-break:break-all}}
 .card-body{{color:#8b949e;font-size:.86rem;margin-bottom:8px}}
+.card-evidence{{color:#adbac7;background:#1c2128;border-left:3px solid #3fb950;font-size:.8rem;padding:6px 10px;border-radius:4px;margin-bottom:8px}}
 .card-query{{display:block;background:#1c2128;border:1px solid #30363d;color:#6e7681;font-size:.68rem;font-family:Consolas,monospace;padding:4px 8px;border-radius:4px;word-break:break-all}}
+.conf{{font-size:.66rem;font-weight:700;letter-spacing:.5px;padding:2px 7px;border-radius:20px;border:1px solid}}
+.conf-verified{{background:#3fb95020;color:#3fb950;border-color:#3fb950}}
+.conf-likely{{background:#58a6ff20;color:#58a6ff;border-color:#58a6ff}}
+.conf-unverifiable{{background:#8b949e20;color:#8b949e;border-color:#8b949e}}
+.conf-false_positive{{background:#d2992220;color:#d29922;border-color:#d29922}}
+.conf-error{{background:#f8514920;color:#f85149;border-color:#f85149}}
+
+/* Cross-correlation */
+.corr-section{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px 24px;margin-bottom:40px}}
+.corr-table{{width:100%;border-collapse:collapse;margin-top:12px;font-size:.85rem}}
+.corr-table th{{text-align:left;color:#8b949e;font-weight:600;border-bottom:1px solid #30363d;padding:6px 10px}}
+.corr-table td{{padding:6px 10px;border-bottom:1px solid #21262d;color:#c9d1d9}}
+.corr-type{{color:#8b949e;text-transform:uppercase;font-size:.72rem}}
+.corr-val{{color:#f0f6fc;font-family:Consolas,monospace}}
+.corr-conf{{font-weight:700;font-size:.72rem}}
+.corr-high{{color:#bc8cff}}
+.corr-medium{{color:#d29922}}
 
 footer{{border-top:1px solid #30363d;padding-top:20px;margin-top:40px;color:#484f58;font-size:.78rem;text-align:center}}
 </style>
@@ -419,6 +517,8 @@ footer{{border-top:1px solid #30363d;padding-top:20px;margin-top:40px;color:#484
 </header>
 
 {ai_block}
+
+{corr_block}
 
 {cards}
 

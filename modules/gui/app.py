@@ -46,8 +46,12 @@ FN_BOLD = ("Segoe UI", 10, "bold")
 FN_MONO = ("Consolas",  9)
 FN_SM   = ("Segoe UI",  9)
 
-SETTINGS_PATH = os.path.join(ROOT, "data", "settings.json")
-HISTORY_PATH  = os.path.join(ROOT, "data", "history.json")
+from modules.paths import data_dir as _data_dir, reports_dir as _reports_dir
+
+DATA_DIR      = _data_dir()
+REPORTS_DIR   = _reports_dir()
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+HISTORY_PATH  = os.path.join(DATA_DIR, "history.json")
 
 # ---------------------------------------------------------------------------
 # Widget helpers
@@ -87,8 +91,8 @@ class OSINTNewsApp:
         self._search_done:   int                    = 0
 
         # Ensure required directories exist on first run
-        os.makedirs(os.path.join(ROOT, "data"),    exist_ok=True)
-        os.makedirs(os.path.join(ROOT, "reports"), exist_ok=True)
+        os.makedirs(DATA_DIR,    exist_ok=True)
+        os.makedirs(REPORTS_DIR, exist_ok=True)
 
         self.history          = HistoryManager(HISTORY_PATH)
         self.settings         = self._load_settings()
@@ -886,7 +890,7 @@ class OSINTNewsApp:
             # Always make the output path absolute so it never hits a
             # protected directory regardless of where Python was launched from
             if not os.path.isabs(out_dir):
-                out_dir = os.path.join(ROOT, out_dir)
+                out_dir = os.path.join(os.path.dirname(REPORTS_DIR), out_dir)
             target_str  = ", ".join(targets)
             report_path = save_report(results, target_str, out_dir)
             if self.settings.get("auto_open", True):
@@ -1132,7 +1136,7 @@ class OSINTNewsApp:
 
     def _load_settings(self) -> dict:
         defaults = {
-            "output_dir": os.path.join(ROOT, "reports"), "delay": 1.5, "max_results": 10,
+            "output_dir": REPORTS_DIR, "delay": 1.5, "max_results": 10,
             "notifications": True, "auto_open": True, "auto_ai": False,
             "ai_provider": "claude", "ai_api_key": "", "ai_model": "",
             "ai_max_tokens": 4000,

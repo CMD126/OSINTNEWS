@@ -11,7 +11,7 @@ ddgs>=6.0.0            # search engine — modern package (was duckduckgo-search
 colorama>=0.4.6        # terminal colours + Windows ANSI fix
 
 # ── Recommended ──────────────────────────────────────────────────────────────
-requests>=2.32.0       # Ollama local API + generic HTTP
+requests>=2.32.0       # Ollama local API + the CLI's --verify pass
 openpyxl>=3.1.0        # Excel (.xlsx) export in the GUI
 
 # ── Optional: desktop notifications ──────────────────────────────────────────
